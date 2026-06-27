@@ -59,6 +59,11 @@ services:
         fromDatabase:
           name: wildlifewatch-postgres
           property: connectionString
+      - key: MCP_TRADE_SERVER_URL
+        fromService:
+          type: web
+          name: wildlifewatch-trade-mcp
+          property: host
 
   # ── Streamlit ──────────────────────────────────────────────────────────────
   - type: web
@@ -73,3 +78,20 @@ services:
           type: web
           name: wildlifewatch-api
           property: host
+  # ── Trade MCP Server ───────────────────────────────────────────────────────
+  - type: web
+    name: wildlifewatch-trade-mcp
+    runtime: docker
+    dockerfilePath: ./src/mcp-servers/trade/Dockerfile
+    dockerContext: ./src/mcp-servers/trade
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: SPECIES_PLUS_API_KEY
+        sync: false
+      - key: MCP_API_KEY
+        sync: false

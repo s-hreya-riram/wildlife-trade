@@ -47,6 +47,11 @@ if not MCP_SPECIES_BASE.startswith("http"):
     MCP_SPECIES_BASE = f"https://{MCP_SPECIES_BASE}"
 MCP_SPECIES_SERVER_URL = f"{MCP_SPECIES_BASE}/mcp"
 
+MCP_TRADE_BASE = os.getenv("MCP_TRADE_SERVER_URL", "http://trade-mcp-server:8002")
+if not MCP_TRADE_BASE.startswith("http"):
+    MCP_TRADE_BASE = f"https://{MCP_TRADE_BASE}"
+MCP_TRADE_SERVER_URL = f"{MCP_TRADE_BASE}/mcp"
+
 S3_BUCKET = os.getenv("S3_BUCKET")
 AWS_REGION = os.getenv("AWS_REGION", "ap-southeast-1")
 REPORT_CACHE_TTL_HOURS = 24
@@ -66,8 +71,10 @@ def get_s3_client():
 # ---------------------------------------------------------------------------
 
 class AppState:
-    session: Optional[ClientSession] = None
-    tools: list = []
+    session: Optional[ClientSession] = None          # species MCP
+    trade_session: Optional[ClientSession] = None    # trade MCP  ← ADD
+    tools: list = []                                 # species tools
+    trade_tools: list = []                           # trade tools  ← ADD
     sessions: dict[str, ClientSession] = {}
 
 
@@ -110,6 +117,8 @@ async def lifespan(app: FastAPI):
         logger.info("Connected to MCP server. Tools: %s", [t["name"] for t in state.tools])
     except Exception as e:
         logger.error("Failed to connect to MCP server: %s", e)
+
+
 
     await init_db()
     yield
@@ -167,7 +176,6 @@ Respond ONLY with valid JSON in this exact format:
   "actionability": <0-10>,
   "reasoning": "<one sentence per dimension>"
 }"""
-
 
 async def run_agent(
     species: Optional[str],
@@ -271,6 +279,126 @@ async def run_eval(report: str) -> dict:
             "actionability": 0,
             "reasoning": "Eval failed to parse.",
         }
+
+TRADE_AGENT_SYSTEM_PROMPT = """You are WildlifeWatch Trade Intelligence, an expert wildlife crime analyst.
+
+Analyse marketplace listings to detect potential illegal wildlife trade.
+You have five tools available — use them ALL in sequence for every listing:
+
+1. classify_listing — identify species/material from text and image
+2. lookup_cites — check CITES appendix status for the identified species
+3. detect_coded_language — scan for trafficking euphemisms
+4. score_severity — combine all signals into HIGH/MEDIUM/LOW
+5. generate_tip_report — produce the final enforcement tip report
+
+ALWAYS call all five tools in order. Never skip a tool. Never fabricate species names or conservation data.
+If species identification confidence is below 0.3, still complete the full pipeline with the best guess and note uncertainty."""
+
+
+async def run_trade_agent(
+    title: str,
+    description: str,
+    platform: str,
+    image_url: str | None,
+) -> dict:
+    """Run the trade analysis agent loop. Returns structured analysis result."""
+    combined_text = f"Title: {title}\nPlatform: {platform}\nDescription: {description}"
+
+    messages = [{
+        "role": "user",
+        "content": (
+            f"Analyse this marketplace listing for potential wildlife trade violations:\n\n"
+            f"{combined_text}"
+            + (f"\n\nImage: {image_url}" if image_url else "")
+        ),
+    }]
+
+    all_tools = state.trade_tools  # only trade tools for this agent
+    collected: dict = {}
+
+    while True:
+        response = anthropic_client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=4096,
+            system=TRADE_AGENT_SYSTEM_PROMPT,
+            tools=all_tools,
+            messages=messages,
+        )
+
+        if response.stop_reason == "end_turn":
+            # Extract final text
+            final_text = "\n".join(
+                block.text for block in response.content if hasattr(block, "text")
+            )
+            collected["agent_summary"] = final_text
+            return collected
+
+        if response.stop_reason == "tool_use":
+            messages.append({"role": "assistant", "content": response.content})
+            tool_results = []
+
+            for block in response.content:
+                if block.type == "tool_use":
+                    session = state.sessions.get(block.name)
+                    if not session:
+                        logger.error("No session for tool: %s", block.name)
+                        continue
+
+                    mcp_result = await session.call_tool(block.name, block.input)
+                    result_text = (
+                        mcp_result.content[0].text
+                        if mcp_result.content
+                        else json.dumps({"error": "empty"})
+                    )
+
+                    # Collect key results for structured response
+                    try:
+                        parsed = json.loads(result_text)
+                        if block.name == "classify_listing" and parsed.get("success"):
+                            c = parsed["classification"]
+                            collected.update({
+                                "species_common": c.get("species_common"),
+                                "species_latin": c.get("species_latin"),
+                                "material_type": c.get("material_type"),
+                                "confidence": c.get("confidence", 0),
+                                "classification_reasoning": c.get("reasoning"),
+                            })
+                        elif block.name == "lookup_cites" and parsed.get("success"):
+                            c = parsed["cites"]
+                            collected.update({
+                                "cites_appendix": c.get("cites_appendix"),
+                                "cites_trade_illegal": c.get("trade_illegal"),
+                                "cites_annotation": c.get("annotation"),
+                            })
+                        elif block.name == "detect_coded_language":
+                            collected.update({
+                                "matched_patterns": parsed.get("matched_patterns", []),
+                                "language_flag_score": parsed.get("language_flag_score", 0),
+                            })
+                        elif block.name == "score_severity":
+                            collected.update({
+                                "severity": parsed.get("severity", "LOW"),
+                                "severity_color": parsed.get("severity_color", "#38a169"),
+                                "severity_reason": parsed.get("severity_reason", ""),
+                                "composite_score": parsed.get("composite_score", 0),
+                                "signal_breakdown": parsed.get("signal_breakdown", {}),
+                            })
+                        elif block.name == "generate_tip_report" and parsed.get("success"):
+                            collected["report_markdown"] = parsed.get("report_markdown", "")
+                    except Exception:
+                        pass
+
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result_text,
+                    })
+
+            messages.append({"role": "user", "content": tool_results})
+        else:
+            break
+
+    return collected
 
 
 # ---------------------------------------------------------------------------
@@ -477,3 +605,59 @@ async def health():
         "status": "ok",
         "mcp_tools": list(state.sessions.keys()),
     }
+
+class TradeAnalysisRequest(BaseModel):
+    title: str = ""
+    description: str = ""
+    platform: str = "Unknown"
+    image_url: Optional[str] = None
+
+
+@app.post("/api/trade/analyse")
+async def analyse_listing(request: TradeAnalysisRequest):
+    if not request.title and not request.description:
+        raise HTTPException(status_code=400, detail="title or description required")
+
+    if not state.trade_session:
+        raise HTTPException(
+            status_code=503,
+            detail="Trade MCP server not connected. Check MCP_TRADE_SERVER_URL env var."
+        )
+
+    import uuid as _uuid
+    report_id = str(_uuid.uuid4())[:8].upper()
+
+    try:
+        result = await run_trade_agent(
+            title=request.title,
+            description=request.description,
+            platform=request.platform,
+            image_url=request.image_url,
+        )
+        result["report_id"] = report_id
+        result["platform"] = request.platform
+        return result
+    except Exception as e:
+        logger.error("Trade analysis failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/species/country/{country_code}")
+async def species_by_country(country_code: str):
+    "Proxy to the species MCP get_species_by_country tool."
+    if not state.session:
+        raise HTTPException(status_code=503, detail="Species MCP not connected")
+    try:
+        mcp_result = await state.session.call_tool(
+            "get_species_by_country", {"country_code": country_code.upper()}
+        )
+        raw = mcp_result.content[0].text if mcp_result.content else "{}"
+        data = json.loads(raw)
+        return {
+            "country_code": country_code.upper(),
+            "species": data.get("species", []),
+            "count": data.get("threatened_species_count", 0),
+        }
+    except Exception as e:
+        logger.error("Species by country failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
