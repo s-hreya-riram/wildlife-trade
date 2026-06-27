@@ -27,6 +27,7 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from mcp import ClientSession
+from contextlib import AsyncExitStack, asynccontextmanager
 from mcp.client.streamable_http import streamable_http_client
 from pydantic import BaseModel
 from weasyprint import HTML
@@ -93,36 +94,58 @@ def _to_anthropic_tool(mcp_tool) -> dict:
 # Lifespan — connect to MCP server on startup
 # ---------------------------------------------------------------------------
 
-from contextlib import AsyncExitStack
-from mcp.client.streamable_http import streamablehttp_client  # note: no underscore before http
+import asyncio
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     exit_stack = AsyncExitStack()
     await exit_stack.__aenter__()
-    
-    try:
-        read, write, _ = await exit_stack.enter_async_context(
-            streamablehttp_client(MCP_SPECIES_SERVER_URL)  # no headers arg — middleware is commented out anyway
-        )
-        session = await exit_stack.enter_async_context(ClientSession(read, write))
-        await session.initialize()
 
-        tools_result = await session.list_tools()
-        for tool in tools_result.tools:
-            state.sessions[tool.name] = session
-            state.tools.append(_to_anthropic_tool(tool))
+    # Retry MCP connections — services may not be ready immediately on Render
+    for attempt in range(10):
+        try:
+            read, write, _ = await exit_stack.enter_async_context(
+                streamable_http_client(MCP_SPECIES_SERVER_URL)
+            )
+            session = await exit_stack.enter_async_context(ClientSession(read, write))
+            await session.initialize()
+            tools_result = await session.list_tools()
+            for tool in tools_result.tools:
+                state.sessions[tool.name] = session
+                state.tools.append(_to_anthropic_tool(tool))
+            state.session = session
+            logger.info("Connected to Species MCP. Tools: %s", [t["name"] for t in state.tools])
+            break
+        except Exception as e:
+            logger.warning("Species MCP connection attempt %d failed: %s", attempt + 1, e)
+            if attempt < 9:
+                await asyncio.sleep(10)
+            else:
+                logger.error("Could not connect to Species MCP after 10 attempts — continuing without it")
 
-        state.session = session
-        logger.info("Connected to MCP server. Tools: %s", [t["name"] for t in state.tools])
-    except Exception as e:
-        logger.error("Failed to connect to MCP server: %s", e)
-
-
+    for attempt in range(10):
+        try:
+            read2, write2, _ = await exit_stack.enter_async_context(
+                streamable_http_client(MCP_TRADE_SERVER_URL)
+            )
+            trade_session = await exit_stack.enter_async_context(ClientSession(read2, write2))
+            await trade_session.initialize()
+            trade_tools_result = await trade_session.list_tools()
+            for tool in trade_tools_result.tools:
+                state.sessions[tool.name] = trade_session
+                state.trade_tools.append(_to_anthropic_tool(tool))
+            state.trade_session = trade_session
+            logger.info("Connected to Trade MCP. Tools: %s", [t["name"] for t in state.trade_tools])
+            break
+        except Exception as e:
+            logger.warning("Trade MCP connection attempt %d failed: %s", attempt + 1, e)
+            if attempt < 9:
+                await asyncio.sleep(10)
+            else:
+                logger.error("Could not connect to Trade MCP after 10 attempts — continuing without it")
 
     await init_db()
     yield
-
     await exit_stack.__aexit__(None, None, None)
 
 
@@ -598,12 +621,14 @@ async def list_reports(species: Optional[str] = None, country: Optional[str] = N
     reports = await get_reports(species=species, country=country)
     return {"reports": reports}
 
-
 @app.get("/health")
 async def health():
     return {
         "status": "ok",
-        "mcp_tools": list(state.sessions.keys()),
+        "species_mcp": state.session is not None,
+        "trade_mcp": state.trade_session is not None,
+        "species_tools": [t["name"] for t in state.tools],
+        "trade_tools": [t["name"] for t in state.trade_tools],
     }
 
 class TradeAnalysisRequest(BaseModel):
