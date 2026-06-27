@@ -67,10 +67,7 @@ services:
     plan: free
     envVars:
       - key: API_URL
-        fromService:
-          type: web
-          name: wildlifewatch-api
-          property: host
+        value: https://wildlifewatch-api.onrender.com
   # ── Trade MCP Server ───────────────────────────────────────────────────────
   - type: web
     name: wildlifewatch-trade-mcp
