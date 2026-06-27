@@ -179,13 +179,13 @@ def load_demo_listings() -> list:
     return []
 
 
-def call_analyse_listing(title, description, platform, image_url) -> dict:
-    st.write(f"DEBUG: API_URL = `{API_URL}`")
+def call_analyse_listing(title, description, platform, image_url, image_b64=None) -> dict:
     try:
         resp = httpx.post(
             f"{API_URL}/api/trade/analyse",
             json={"title": title, "description": description,
-                  "platform": platform, "image_url": image_url or None},
+                "platform": platform, "image_url": image_url or None,
+                "image_b64": image_b64 or None},
             timeout=90,
         )
         resp.raise_for_status()
@@ -393,6 +393,12 @@ elif view == "🔍 Analyse a Listing":
             "Image URL (optional — used for visual species identification)",
             placeholder="https://…",
         )
+        uploaded = st.file_uploader("OPtional - Upload listing image", type=["jpg","jpeg","png"])
+        image_b64 = None
+        if uploaded:
+            import base64
+            image_b64 = base64.b64encode(uploaded.read()).decode()
+            st.image(uploaded, caption="Uploaded image", width=300)
         submitted = st.form_submit_button("🔍 Run Analysis", use_container_width=True)
 
     if submitted:
@@ -402,7 +408,7 @@ elif view == "🔍 Analyse a Listing":
             with st.status("Running trade intelligence analysis…", expanded=True) as status_box:
                 st.write("🔍 **Step 1/5** — Classifying species and material from listing text" +
                          (" + image" if image_url else "") + "…")
-                result = call_analyse_listing(title, description, platform, image_url)
+                result = call_analyse_listing(title, description, platform, image_url, image_b64)
 
                 if "error" in result:
                     status_box.update(label="Analysis failed ❌", state="error")
@@ -521,10 +527,8 @@ elif view == "📋 Tip Report":
                 st.metric("IUCN Status", f"{iucn_raw} – {iucn_label_str}" if iucn_raw else "—")
 
         st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown(
-            f'<div class="report-box">{st.session_state.tip_report}</div>',
-            unsafe_allow_html=True,
-        )
+        with st.container(border=True):
+            st.markdown(st.session_state.tip_report)
 
         # Coded language callout
         patterns = result.get("matched_patterns", [])

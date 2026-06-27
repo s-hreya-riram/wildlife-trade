@@ -88,6 +88,7 @@ async def classify_listing(
     title: str,
     description: str,
     image_url: str = "",
+    image_b64: str = "",
 ) -> str:
     """
     Classify a marketplace listing to identify potential wildlife species or
@@ -118,7 +119,12 @@ If no wildlife concern is detected, set species to null, confidence below 0.3, a
 
     messages_content = []
 
-    if image_url and image_url.startswith("http"):
+    if image_b64:
+        messages_content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{image_b64}", "detail": "high"},
+        })
+    elif image_url and image_url.startswith("http"):
         messages_content.append({
             "type": "image_url",
             "image_url": {"url": image_url, "detail": "high"},

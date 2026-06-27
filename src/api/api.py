@@ -396,16 +396,28 @@ async def run_trade_agent(
     description: str,
     platform: str,
     image_url: Optional[str],
+    image_b64: Optional[str] = None
 ) -> dict:
     combined_text = f"Title: {title}\nPlatform: {platform}\nDescription: {description}"
-    messages = [{
-        "role": "user",
-        "content": (
-            f"Analyse this marketplace listing for potential wildlife trade violations:\n\n"
-            f"{combined_text}"
-            + (f"\n\nImage: {image_url}" if image_url else "")
-        ),
-    }]
+    user_content = [
+        {
+            "type": "text",
+            "text": f"Analyse this marketplace listing for potential wildlife trade violations:\n\n{combined_text}"
+                + (f"\n\nImage URL for analysis: {image_url}" if image_url else ""),
+        }
+    ]
+
+    if image_b64:
+        user_content.insert(0, {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/jpeg",
+                "data": image_b64,
+            },
+        })
+
+    messages = [{"role": "user", "content": user_content}]
 
     collected: dict = {}
 
@@ -605,6 +617,7 @@ class TradeAnalysisRequest(BaseModel):
     description: str = ""
     platform: str = "Unknown"
     image_url: Optional[str] = None
+    image_b64: Optional[str] = None
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -636,6 +649,7 @@ async def analyse_listing(request: TradeAnalysisRequest):
             description=request.description,
             platform=request.platform,
             image_url=request.image_url,
+            image_b64=request.image_b64
         )
         result["report_id"] = report_id
         result["platform"] = request.platform
