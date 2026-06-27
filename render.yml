@@ -1,0 +1,75 @@
+databases:
+  - name: wildlifewatch-postgres
+    databaseName: wildlifewatch
+    user: wildlifewatch
+    plan: free
+
+services:
+  # ── Redis ──────────────────────────────────────────────────────────────────
+  - type: redis
+    name: wildlifewatch-redis
+    plan: free
+    maxmemoryPolicy: allkeys-lru
+
+  # ── Species MCP Server ─────────────────────────────────────────────────────
+  - type: web
+    name: wildlifewatch-species-mcp
+    runtime: docker
+    dockerfilePath: ./src/mcp-servers/species/Dockerfile
+    dockerContext: ./src/mcp-servers/species
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: IUCN_TOKEN
+        sync: false          # set manually in Render dashboard
+      - key: MCP_API_KEY
+        sync: false
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: wildlifewatch-redis
+          property: connectionString
+
+  # ── FastAPI ────────────────────────────────────────────────────────────────
+  - type: web
+    name: wildlifewatch-api
+    runtime: docker
+    dockerfilePath: ./src/api/Dockerfile
+    dockerContext: ./src/api
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: MCP_API_KEY
+        sync: false
+      - key: MCP_SPECIES_SERVER_URL
+        fromService:
+          type: web
+          name: wildlifewatch-species-mcp
+          property: host
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: wildlifewatch-redis
+          property: connectionString
+      - key: DATABASE_URL
+        fromDatabase:
+          name: wildlifewatch-postgres
+          property: connectionString
+
+  # ── Streamlit ──────────────────────────────────────────────────────────────
+  - type: web
+    name: wildlifewatch-streamlit
+    runtime: docker
+    dockerfilePath: ./streamlit_app/Dockerfile
+    dockerContext: ./streamlit_app
+    plan: free
+    envVars:
+      - key: API_URL
+        fromService:
+          type: web
+          name: wildlifewatch-api
+          property: host

@@ -39,7 +39,14 @@ logger = logging.getLogger(__name__)
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 MCP_API_KEY = os.getenv("MCP_API_KEY")
-MCP_SPECIES_SERVER_URL = os.getenv("MCP_SPECIES_SERVER_URL", "http://species-mcp-server:8001/mcp")
+
+# Build MCP URL from base host env var
+MCP_SPECIES_BASE = os.getenv("MCP_SPECIES_SERVER_URL", "http://species-mcp-server:8001")
+# Render gives bare hostname, add https:// if missing
+if not MCP_SPECIES_BASE.startswith("http"):
+    MCP_SPECIES_BASE = f"https://{MCP_SPECIES_BASE}"
+MCP_SPECIES_SERVER_URL = f"{MCP_SPECIES_BASE}/mcp"
+
 S3_BUCKET = os.getenv("S3_BUCKET")
 AWS_REGION = os.getenv("AWS_REGION", "ap-southeast-1")
 REPORT_CACHE_TTL_HOURS = 24
