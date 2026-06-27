@@ -12,6 +12,7 @@ from pathlib import Path
 
 import httpx
 import streamlit as st
+from typing import Optional
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -51,10 +52,24 @@ SEVERITY_META = {
 
 SPECIES_IMAGES = {
     "Manis javanica": "https://upload.wikimedia.org/wikipedia/commons/a/a3/Pangolin.jpg",
+    "Manis spp": "https://upload.wikimedia.org/wikipedia/commons/a/a3/Pangolin.jpg",
     "Panthera tigris": "https://upload.wikimedia.org/wikipedia/commons/6/66/Adult_male_Royal_Bengal_tiger.jpg",
     "Loxodonta africana": "https://upload.wikimedia.org/wikipedia/commons/9/94/178_Male_African_bush_elephant_in_Etosha_National_Park_Photo_by_Giles_Laurent.jpg",
     # TODO add more species later!!!
 }
+
+def get_species_image(latin: str) -> Optional[str]:
+    if not latin:
+        return None
+    # exact match first
+    if latin in SPECIES_IMAGES:
+        return SPECIES_IMAGES[latin]
+    # fuzzy: match on genus
+    genus = latin.split()[0]
+    for key, url in SPECIES_IMAGES.items():
+        if key.startswith(genus):
+            return url
+    return None
 
 # ── Page config ───────────────────────────────────────────────────────────────
 
@@ -504,9 +519,16 @@ elif view == "📋 Tip Report":
         result = st.session_state.analysis_result or {}
 
         latin = result.get("species_latin", "")
-        img_url = SPECIES_IMAGES.get(latin)
+        img_url = get_species_image(result.get("species_latin", ""))
         if img_url:
-            st.image(img_url, width=280, caption=f"{result.get('species_common')} · {latin}")
+            col_img, col_meta = st.columns([1, 3])
+            with col_img:
+                st.image(img_url, width=160)
+            with col_meta:
+                st.markdown(f"**{result.get('species_common', '')}**")
+                st.markdown(f"*{result.get('species_latin', '')}*")
+                if result.get('classification_reasoning'):
+                    st.caption(result['classification_reasoning'])
         severity = result.get("severity", "")
         report_id = result.get("report_id") or result.get("id") or "DEMO"
 
@@ -533,10 +555,10 @@ elif view == "📋 Tip Report":
             with c1:
                 st.metric("Species", species_c or "—")
             with c2:
-                st.metric("CITES Appendix", cites or "Not listed")
+                st.metric("CITES", f"Appendix {cites}" if cites else "Not listed")
             with c3:
-                iucn_label_str = IUCN_LABELS.get(iucn_raw, ("Unknown", ""))[0]
-                st.metric("IUCN Status", f"{iucn_raw} – {iucn_label_str}" if iucn_raw else "—")
+                iucn_label_str = IUCN_LABELS.get(iucn_raw, ("—", ""))[0]
+                st.metric("IUCN", iucn_raw or "—", delta=iucn_label_str, delta_color="off")
 
         st.markdown("<br>", unsafe_allow_html=True)
         with st.container(border=True):
