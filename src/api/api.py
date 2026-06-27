@@ -103,10 +103,39 @@ def _to_anthropic_tool(mcp_tool) -> dict:
 # Lifespan — just init DB; MCP connects lazily on first request
 # ---------------------------------------------------------------------------
 
+from contextlib import asynccontextmanager
+from mcp.client.streamable_http import streamable_http_client
+from mcp import ClientSession
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
-    yield
+    logger.info("Connecting to Species MCP at: %s", MCP_SPECIES_SERVER_URL)
+    logger.info("Connecting to Trade MCP at: %s", MCP_TRADE_SERVER_URL)
+
+    # Open MCP connections and keep them alive for the app lifetime
+    async with streamable_http_client(MCP_SPECIES_SERVER_URL) as (read, write, _):
+        async with ClientSession(read, write) as species_session:
+            await species_session.initialize()
+            tools_result = await species_session.list_tools()
+            state.session = species_session
+            for tool in tools_result.tools:
+                state.sessions[tool.name] = species_session
+                state.tools.append(_to_anthropic_tool(tool))
+            logger.info("Species MCP connected. Tools: %s", [t["name"] for t in state.tools])
+
+            async with streamable_http_client(MCP_TRADE_SERVER_URL) as (read2, write2, _):
+                async with ClientSession(read2, write2) as trade_session:
+                    await trade_session.initialize()
+                    trade_tools_result = await trade_session.list_tools()
+                    state.trade_session = trade_session
+                    for tool in trade_tools_result.tools:
+                        state.sessions[tool.name] = trade_session
+                        state.trade_tools.append(_to_anthropic_tool(tool))
+                    logger.info("Trade MCP connected. Tools: %s", [t["name"] for t in state.trade_tools])
+
+                    yield  # app runs here, both sessions stay open
+    # Sessions close here when app shuts down
 
 
 # ---------------------------------------------------------------------------
@@ -549,8 +578,8 @@ async def health():
 
 @app.post("/api/trade/analyse")
 async def analyse_listing(request: TradeAnalysisRequest):
-    if not request.title and not request.description:
-        raise HTTPException(status_code=400, detail="title or description required")
+    if not state.trade_session:
+        raise HTTPException(status_code=503, detail="Trade MCP server not connected")
 
     await get_trade_session()
     if not state.trade_session:
@@ -574,9 +603,9 @@ async def analyse_listing(request: TradeAnalysisRequest):
 
 @app.get("/api/species/country/{country_code}")
 async def species_by_country(country_code: str):
-    await get_species_session()
     if not state.session:
         raise HTTPException(status_code=503, detail="Species MCP not connected")
+
     try:
         mcp_result = await state.session.call_tool(
             "get_species_by_country", {"country_code": country_code.upper()}
