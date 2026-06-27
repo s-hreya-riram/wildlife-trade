@@ -103,39 +103,79 @@ def _to_anthropic_tool(mcp_tool) -> dict:
 # Lifespan — just init DB; MCP connects lazily on first request
 # ---------------------------------------------------------------------------
 
+# api.py
+
+import asyncio
 from contextlib import asynccontextmanager
-from mcp.client.streamable_http import streamable_http_client
-from mcp import ClientSession
+
+_species_cm = None
+_trade_cm = None
+
+async def _connect_species():
+    global _species_cm
+    for attempt in range(10):
+        try:
+            logger.info("Connecting to Species MCP at: %s", MCP_SPECIES_SERVER_URL)
+            cm = streamable_http_client(MCP_SPECIES_SERVER_URL)
+            read, write, _ = await cm.__aenter__()
+            session = ClientSession(read, write)
+            await session.__aenter__()
+            await session.initialize()
+            tools_result = await session.list_tools()
+            state.session = session
+            for tool in tools_result.tools:
+                state.sessions[tool.name] = session
+                if not any(t["name"] == tool.name for t in state.tools):
+                    state.tools.append(_to_anthropic_tool(tool))
+            logger.info("Species MCP connected. Tools: %s", [t["name"] for t in state.tools])
+            _species_cm = (cm, session)
+            return
+        except Exception as e:
+            logger.warning("Species MCP attempt %d failed: %s", attempt + 1, e)
+            await asyncio.sleep(5)
+    logger.error("Species MCP failed to connect after 10 attempts")
+
+
+async def _connect_trade():
+    global _trade_cm
+    for attempt in range(10):
+        try:
+            logger.info("Connecting to Trade MCP at: %s", MCP_TRADE_SERVER_URL)
+            cm = streamable_http_client(MCP_TRADE_SERVER_URL)
+            read, write, _ = await cm.__aenter__()
+            session = ClientSession(read, write)
+            await session.__aenter__()
+            await session.initialize()
+            tools_result = await session.list_tools()
+            state.trade_session = session
+            for tool in tools_result.tools:
+                state.sessions[tool.name] = session
+                if not any(t["name"] == tool.name for t in state.trade_tools):
+                    state.trade_tools.append(_to_anthropic_tool(tool))
+            logger.info("Trade MCP connected. Tools: %s", [t["name"] for t in state.trade_tools])
+            _trade_cm = (cm, session)
+            return
+        except Exception as e:
+            logger.warning("Trade MCP attempt %d failed: %s", attempt + 1, e)
+            await asyncio.sleep(5)
+    logger.error("Trade MCP failed to connect after 10 attempts")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
-    logger.info("Connecting to Species MCP at: %s", MCP_SPECIES_SERVER_URL)
-    logger.info("Connecting to Trade MCP at: %s", MCP_TRADE_SERVER_URL)
-
-    # Open MCP connections and keep them alive for the app lifetime
-    async with streamable_http_client(MCP_SPECIES_SERVER_URL) as (read, write, _):
-        async with ClientSession(read, write) as species_session:
-            await species_session.initialize()
-            tools_result = await species_session.list_tools()
-            state.session = species_session
-            for tool in tools_result.tools:
-                state.sessions[tool.name] = species_session
-                state.tools.append(_to_anthropic_tool(tool))
-            logger.info("Species MCP connected. Tools: %s", [t["name"] for t in state.tools])
-
-            async with streamable_http_client(MCP_TRADE_SERVER_URL) as (read2, write2, _):
-                async with ClientSession(read2, write2) as trade_session:
-                    await trade_session.initialize()
-                    trade_tools_result = await trade_session.list_tools()
-                    state.trade_session = trade_session
-                    for tool in trade_tools_result.tools:
-                        state.sessions[tool.name] = trade_session
-                        state.trade_tools.append(_to_anthropic_tool(tool))
-                    logger.info("Trade MCP connected. Tools: %s", [t["name"] for t in state.trade_tools])
-
-                    yield  # app runs here, both sessions stay open
-    # Sessions close here when app shuts down
+    # Fire connections in background — don't block startup
+    asyncio.create_task(_connect_species())
+    asyncio.create_task(_connect_trade())
+    yield
+    # Cleanup
+    for cm, session in [_species_cm, _trade_cm]:
+        if cm and session:
+            try:
+                await session.__aexit__(None, None, None)
+                await cm.__aexit__(None, None, None)
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------

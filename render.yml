@@ -45,10 +45,7 @@ services:
       - key: MCP_API_KEY
         sync: false
       - key: MCP_SPECIES_SERVER_URL
-        fromService:
-          type: web
-          name: wildlifewatch-species-mcp
-          property: host
+        value: https://wildlifewatch-species-mcp.onrender.com/mcp
       - key: REDIS_URL
         fromService:
           type: redis
@@ -59,10 +56,7 @@ services:
           name: wildlifewatch-postgres
           property: connectionString
       - key: MCP_TRADE_SERVER_URL
-        fromService:
-          type: web
-          name: wildlifewatch-trade-mcp
-          property: host
+        value: https://wildlifewatch-trade-mcp.onrender.com/mcp
 
   # ── Streamlit ──────────────────────────────────────────────────────────────
   - type: web
