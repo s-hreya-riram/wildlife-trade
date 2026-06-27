@@ -103,79 +103,83 @@ def _to_anthropic_tool(mcp_tool) -> dict:
 # Lifespan — just init DB; MCP connects lazily on first request
 # ---------------------------------------------------------------------------
 
-# api.py
-
 import asyncio
 from contextlib import asynccontextmanager
 
-_species_cm = None
-_trade_cm = None
+_background_tasks = set()
 
-async def _connect_species():
-    global _species_cm
+async def _species_connection_loop():
+    """Owns the species MCP connection for the app lifetime."""
     for attempt in range(10):
         try:
-            logger.info("Connecting to Species MCP at: %s", MCP_SPECIES_SERVER_URL)
-            cm = streamable_http_client(MCP_SPECIES_SERVER_URL)
-            read, write, _ = await cm.__aenter__()
-            session = ClientSession(read, write)
-            await session.__aenter__()
-            await session.initialize()
-            tools_result = await session.list_tools()
-            state.session = session
-            for tool in tools_result.tools:
-                state.sessions[tool.name] = session
-                if not any(t["name"] == tool.name for t in state.tools):
-                    state.tools.append(_to_anthropic_tool(tool))
-            logger.info("Species MCP connected. Tools: %s", [t["name"] for t in state.tools])
-            _species_cm = (cm, session)
+            print(f"[MCP] Species attempt {attempt+1}: {MCP_SPECIES_SERVER_URL}", flush=True)
+            async with streamable_http_client(MCP_SPECIES_SERVER_URL) as (read, write, _):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    tools_result = await session.list_tools()
+                    state.session = session
+                    state.tools.clear()
+                    for tool in tools_result.tools:
+                        state.sessions[tool.name] = session
+                        state.tools.append(_to_anthropic_tool(tool))
+                    print(f"[MCP] Species connected. Tools: {[t['name'] for t in state.tools]}", flush=True)
+                    # Hold the connection open indefinitely
+                    await asyncio.Future()
+        except asyncio.CancelledError:
+            print("[MCP] Species connection loop cancelled", flush=True)
+            state.session = None
             return
         except Exception as e:
-            logger.warning("Species MCP attempt %d failed: %s", attempt + 1, e)
+            print(f"[MCP] Species attempt {attempt+1} failed: {e}", flush=True)
+            state.session = None
             await asyncio.sleep(5)
-    logger.error("Species MCP failed to connect after 10 attempts")
+    print("[MCP] Species MCP failed after 10 attempts", flush=True)
 
 
-async def _connect_trade():
-    global _trade_cm
+async def _trade_connection_loop():
+    """Owns the trade MCP connection for the app lifetime."""
     for attempt in range(10):
         try:
-            logger.info("Connecting to Trade MCP at: %s", MCP_TRADE_SERVER_URL)
-            cm = streamable_http_client(MCP_TRADE_SERVER_URL)
-            read, write, _ = await cm.__aenter__()
-            session = ClientSession(read, write)
-            await session.__aenter__()
-            await session.initialize()
-            tools_result = await session.list_tools()
-            state.trade_session = session
-            for tool in tools_result.tools:
-                state.sessions[tool.name] = session
-                if not any(t["name"] == tool.name for t in state.trade_tools):
-                    state.trade_tools.append(_to_anthropic_tool(tool))
-            logger.info("Trade MCP connected. Tools: %s", [t["name"] for t in state.trade_tools])
-            _trade_cm = (cm, session)
+            print(f"[MCP] Trade attempt {attempt+1}: {MCP_TRADE_SERVER_URL}", flush=True)
+            async with streamable_http_client(MCP_TRADE_SERVER_URL) as (read, write, _):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    tools_result = await session.list_tools()
+                    state.trade_session = session
+                    state.trade_tools.clear()
+                    for tool in tools_result.tools:
+                        state.sessions[tool.name] = session
+                        state.trade_tools.append(_to_anthropic_tool(tool))
+                    print(f"[MCP] Trade connected. Tools: {[t['name'] for t in state.trade_tools]}", flush=True)
+                    await asyncio.Future()
+        except asyncio.CancelledError:
+            print("[MCP] Trade connection loop cancelled", flush=True)
+            state.trade_session = None
             return
         except Exception as e:
-            logger.warning("Trade MCP attempt %d failed: %s", attempt + 1, e)
+            print(f"[MCP] Trade attempt {attempt+1} failed: {e}", flush=True)
+            state.trade_session = None
             await asyncio.sleep(5)
-    logger.error("Trade MCP failed to connect after 10 attempts")
+    print("[MCP] Trade MCP failed after 10 attempts", flush=True)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    print("[STARTUP] lifespan started", flush=True)
     await init_db()
-    # Fire connections in background — don't block startup
-    asyncio.create_task(_connect_species())
-    asyncio.create_task(_connect_trade())
+
+    t1 = asyncio.create_task(_species_connection_loop())
+    t2 = asyncio.create_task(_trade_connection_loop())
+    _background_tasks.update({t1, t2})
+
     yield
-    # Cleanup
-    for cm, session in [_species_cm, _trade_cm]:
-        if cm and session:
-            try:
-                await session.__aexit__(None, None, None)
-                await cm.__aexit__(None, None, None)
-            except Exception:
-                pass
+
+    # Shutdown: cancel the loops, which triggers CancelledError inside the
+    # async with blocks, cleanly closing the sessions and transports
+    print("[SHUTDOWN] cancelling MCP loops", flush=True)
+    t1.cancel()
+    t2.cancel()
+    await asyncio.gather(t1, t2, return_exceptions=True)
 
 
 # ---------------------------------------------------------------------------
