@@ -381,6 +381,7 @@ async def score_severity(
         "severity_color": color,
         "composite_score": round(score, 3),
         "severity_reason": reason_str,
+        "iucn_status": iucn_status,
         "signal_breakdown": {
             "cites_contribution": round(cites_score * 0.40, 3),
             "iucn_contribution": round(iucn_score * 0.25, 3),

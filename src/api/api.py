@@ -481,6 +481,7 @@ async def run_trade_agent(
                                 "severity_reason": parsed.get("severity_reason", ""),
                                 "composite_score": parsed.get("composite_score", 0),
                                 "signal_breakdown": parsed.get("signal_breakdown", {}),
+                                "iucn_status": parsed.get("iucn_status", ""),  # add this
                             })
                         elif block.name == "generate_tip_report" and parsed.get("success"):
                             collected["report_markdown"] = parsed.get("report_markdown", "")
