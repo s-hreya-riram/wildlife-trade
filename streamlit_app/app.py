@@ -180,6 +180,7 @@ def load_demo_listings() -> list:
 
 
 def call_analyse_listing(title, description, platform, image_url) -> dict:
+    st.write(f"DEBUG: API_URL = `{API_URL}`")
     try:
         resp = httpx.post(
             f"{API_URL}/api/trade/analyse",
