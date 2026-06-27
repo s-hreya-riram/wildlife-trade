@@ -1,0 +1,68 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  postgres:
+    image: postgres:15
+    ports:
+      - "4321:5432"
+    environment:
+      POSTGRES_USER: wildlifewatch
+      POSTGRES_PASSWORD: wildlifewatch
+      POSTGRES_DB: wildlifewatch
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wildlifewatch"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  species-mcp-server:
+    build:
+      context: ./src/mcp-servers/species
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8001"
+    environment:
+      - IUCN_TOKEN=${IUCN_TOKEN}
+      - MCP_API_KEY=${MCP_API_KEY}
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  api:
+    build:
+      context: ./src/api
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - MCP_API_KEY=${MCP_API_KEY}
+      - MCP_SPECIES_SERVER_URL=http://species-mcp-server:8001/mcp
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://wildlifewatch:wildlifewatch@postgres:5432/wildlifewatch
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_REGION=${AWS_REGION}
+      - S3_BUCKET=${S3_BUCKET}
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      species-mcp-server:
+        condition: service_started
+
+volumes:
+  postgres_data:

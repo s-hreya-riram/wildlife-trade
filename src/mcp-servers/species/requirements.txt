@@ -1,0 +1,17 @@
+fastmcp
+httpx
+redis[asyncio]
+python-dotenv
+uvicorn
+
+fastapi
+uvicorn
+anthropic
+openai
+httpx
+asyncpg
+weasyprint
+boto3
+python-dotenv
+mcp
+pydantic
