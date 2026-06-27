@@ -49,6 +49,13 @@ SEVERITY_META = {
     "LOW":    ("🟢", "#166534", "#dcfce7"),
 }
 
+SPECIES_IMAGES = {
+    "Manis javanica": "https://upload.wikimedia.org/wikipedia/commons/a/a3/Pangolin.jpg",
+    "Panthera tigris": "https://upload.wikimedia.org/wikipedia/commons/6/66/Adult_male_Royal_Bengal_tiger.jpg",
+    "Loxodonta africana": "https://upload.wikimedia.org/wikipedia/commons/9/94/178_Male_African_bush_elephant_in_Etosha_National_Park_Photo_by_Giles_Laurent.jpg",
+    # TODO add more species later!!!
+}
+
 # ── Page config ───────────────────────────────────────────────────────────────
 
 st.set_page_config(
@@ -495,6 +502,11 @@ elif view == "📋 Tip Report":
             st.rerun()
     else:
         result = st.session_state.analysis_result or {}
+
+        latin = result.get("species_latin", "")
+        img_url = SPECIES_IMAGES.get(latin)
+        if img_url:
+            st.image(img_url, width=280, caption=f"{result.get('species_common')} · {latin}")
         severity = result.get("severity", "")
         report_id = result.get("report_id") or result.get("id") or "DEMO"
 
