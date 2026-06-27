@@ -2,19 +2,30 @@
 WildlifeWatch API.
 
 Architecture:
-  React → POST /api/report
-        → FastAPI (this file)
-        → MCP Client (StreamableHTTP → species MCP server)
-        → Claude agent loop (tool calls via MCP)
-        → Reflection pass (Claude improves draft)
-        → Eval agent (LLM-as-judge)
-        → PDF generation (WeasyPrint)
-        → S3 upload → presigned URL
-        → Postgres (report metadata + scores)
+  Streamlit → POST /api/trade/analyse
+            → FastAPI (this file)
+            → MCP Client (StreamableHTTP → trade MCP server)
+            → Claude agent loop (tool calls via MCP)
+            → Tip report generated
+
+  Streamlit → GET /api/species/country/{code}
+            → FastAPI
+            → MCP Client (StreamableHTTP → species MCP server)
+
+  Streamlit → POST /api/report
+            → FastAPI
+            → MCP Client (StreamableHTTP → species MCP server)
+            → Claude agent loop
+            → Reflection pass
+            → Eval agent (GPT-4o)
+            → PDF generation (WeasyPrint)
+            → S3 upload → presigned URL
+            → Postgres (report metadata + scores)
 """
 import json
 import logging
 import os
+import re
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -23,11 +34,9 @@ from typing import Optional
 import anthropic
 from openai import OpenAI
 import boto3
-import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from mcp import ClientSession
-from contextlib import AsyncExitStack, asynccontextmanager
 from mcp.client.streamable_http import streamable_http_client
 from pydantic import BaseModel
 from weasyprint import HTML
@@ -41,9 +50,7 @@ logger = logging.getLogger(__name__)
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 MCP_API_KEY = os.getenv("MCP_API_KEY")
 
-# Build MCP URL from base host env var
 MCP_SPECIES_BASE = os.getenv("MCP_SPECIES_SERVER_URL", "http://species-mcp-server:8001")
-# Render gives bare hostname, add https:// if missing
 if not MCP_SPECIES_BASE.startswith("http"):
     MCP_SPECIES_BASE = f"https://{MCP_SPECIES_BASE}"
 MCP_SPECIES_SERVER_URL = f"{MCP_SPECIES_BASE}/mcp"
@@ -55,7 +62,6 @@ MCP_TRADE_SERVER_URL = f"{MCP_TRADE_BASE}/mcp"
 
 S3_BUCKET = os.getenv("S3_BUCKET")
 AWS_REGION = os.getenv("AWS_REGION", "ap-southeast-1")
-REPORT_CACHE_TTL_HOURS = 24
 
 if not ANTHROPIC_API_KEY:
     raise ValueError("ANTHROPIC_API_KEY not set")
@@ -63,19 +69,22 @@ if not MCP_API_KEY:
     raise ValueError("MCP_API_KEY not set")
 
 anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+
 def get_s3_client():
     return boto3.client("s3", region_name=AWS_REGION)
 
 
 # ---------------------------------------------------------------------------
-# App state — MCP session and tools
+# App state
 # ---------------------------------------------------------------------------
 
 class AppState:
-    session: Optional[ClientSession] = None          # species MCP
-    trade_session: Optional[ClientSession] = None    # trade MCP  ← ADD
-    tools: list = []                                 # species tools
-    trade_tools: list = []                           # trade tools  ← ADD
+    session: Optional[ClientSession] = None
+    trade_session: Optional[ClientSession] = None
+    tools: list = []
+    trade_tools: list = []
     sessions: dict[str, ClientSession] = {}
 
 
@@ -91,66 +100,63 @@ def _to_anthropic_tool(mcp_tool) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Lifespan — connect to MCP server on startup
+# Lifespan — just init DB; MCP connects lazily on first request
 # ---------------------------------------------------------------------------
-
-import asyncio
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    exit_stack = AsyncExitStack()
-    await exit_stack.__aenter__()
-
-    # Retry MCP connections — services may not be ready immediately on Render
-    for attempt in range(10):
-        try:
-            read, write, _ = await exit_stack.enter_async_context(
-                streamable_http_client(MCP_SPECIES_SERVER_URL)
-            )
-            session = await exit_stack.enter_async_context(ClientSession(read, write))
-            await session.initialize()
-            tools_result = await session.list_tools()
-            for tool in tools_result.tools:
-                state.sessions[tool.name] = session
-                state.tools.append(_to_anthropic_tool(tool))
-            state.session = session
-            logger.info("Connected to Species MCP. Tools: %s", [t["name"] for t in state.tools])
-            break
-        except Exception as e:
-            logger.warning("Species MCP connection attempt %d failed: %s", attempt + 1, e)
-            if attempt < 9:
-                await asyncio.sleep(10)
-            else:
-                logger.error("Could not connect to Species MCP after 10 attempts — continuing without it")
-
-    for attempt in range(10):
-        try:
-            read2, write2, _ = await exit_stack.enter_async_context(
-                streamable_http_client(MCP_TRADE_SERVER_URL)
-            )
-            trade_session = await exit_stack.enter_async_context(ClientSession(read2, write2))
-            await trade_session.initialize()
-            trade_tools_result = await trade_session.list_tools()
-            for tool in trade_tools_result.tools:
-                state.sessions[tool.name] = trade_session
-                state.trade_tools.append(_to_anthropic_tool(tool))
-            state.trade_session = trade_session
-            logger.info("Connected to Trade MCP. Tools: %s", [t["name"] for t in state.trade_tools])
-            break
-        except Exception as e:
-            logger.warning("Trade MCP connection attempt %d failed: %s", attempt + 1, e)
-            if attempt < 9:
-                await asyncio.sleep(10)
-            else:
-                logger.error("Could not connect to Trade MCP after 10 attempts — continuing without it")
-
     await init_db()
     yield
-    await exit_stack.__aexit__(None, None, None)
 
 
 # ---------------------------------------------------------------------------
-# Agent loop
+# Lazy MCP connection helpers
+# ---------------------------------------------------------------------------
+
+async def get_species_session() -> Optional[ClientSession]:
+    """Return existing species MCP session, or connect on first call."""
+    if state.session is not None:
+        return state.session
+    try:
+        async with streamable_http_client(MCP_SPECIES_SERVER_URL) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                tools_result = await session.list_tools()
+                for tool in tools_result.tools:
+                    state.sessions[tool.name] = session
+                    if not any(t["name"] == tool.name for t in state.tools):
+                        state.tools.append(_to_anthropic_tool(tool))
+                state.session = session
+                logger.info("Connected to Species MCP. Tools: %s", [t["name"] for t in state.tools])
+                return session
+    except Exception as e:
+        logger.error("Species MCP connection failed: %s", e)
+        return None
+
+
+async def get_trade_session() -> Optional[ClientSession]:
+    """Return existing trade MCP session, or connect on first call."""
+    if state.trade_session is not None:
+        return state.trade_session
+    try:
+        async with streamable_http_client(MCP_TRADE_SERVER_URL) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                tools_result = await session.list_tools()
+                for tool in tools_result.tools:
+                    state.sessions[tool.name] = session
+                    if not any(t["name"] == tool.name for t in state.trade_tools):
+                        state.trade_tools.append(_to_anthropic_tool(tool))
+                state.trade_session = session
+                logger.info("Connected to Trade MCP. Tools: %s", [t["name"] for t in state.trade_tools])
+                return session
+    except Exception as e:
+        logger.error("Trade MCP connection failed: %s", e)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Conservation report agent (species MCP)
 # ---------------------------------------------------------------------------
 
 AGENT_SYSTEM_PROMPT = """You are WildlifeWatch, a conservation intelligence agent.
@@ -200,14 +206,13 @@ Respond ONLY with valid JSON in this exact format:
   "reasoning": "<one sentence per dimension>"
 }"""
 
+
 async def run_agent(
     species: Optional[str],
     country: Optional[str],
     year_from: Optional[int],
     year_to: Optional[int],
 ) -> str:
-    """Run the agentic tool loop and return a draft report."""
-    # Build the user prompt
     parts = ["Generate a conservation report"]
     if species:
         parts.append(f"for the species: {species}")
@@ -217,8 +222,7 @@ async def run_agent(
         range_str = f"from {year_from or 'earliest'} to {year_to or 'latest'}"
         parts.append(f"covering the time range {range_str}")
 
-    user_prompt = " ".join(parts) + "."
-    messages = [{"role": "user", "content": user_prompt}]
+    messages = [{"role": "user", "content": " ".join(parts) + "."}]
 
     while True:
         response = anthropic_client.messages.create(
@@ -237,14 +241,12 @@ async def run_agent(
         if response.stop_reason == "tool_use":
             messages.append({"role": "assistant", "content": response.content})
             tool_results = []
-
             for block in response.content:
                 if block.type == "tool_use":
                     session = state.sessions.get(block.name)
                     if not session:
                         logger.error("No session for tool: %s", block.name)
                         continue
-
                     mcp_result = await session.call_tool(block.name, block.input)
                     result_text = (
                         mcp_result.content[0].text
@@ -256,7 +258,6 @@ async def run_agent(
                         "tool_use_id": block.id,
                         "content": result_text,
                     })
-
             messages.append({"role": "user", "content": tool_results})
         else:
             break
@@ -265,23 +266,17 @@ async def run_agent(
 
 
 async def run_reflection(draft: str) -> str:
-    """Ask Claude to review and improve the draft report."""
     response = anthropic_client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=4096,
-        messages=[{
-            "role": "user",
-            "content": f"{REFLECTION_PROMPT}\n\n---\n\n{draft}"
-        }],
+        messages=[{"role": "user", "content": f"{REFLECTION_PROMPT}\n\n---\n\n{draft}"}],
     )
     return "\n".join(
         block.text for block in response.content if hasattr(block, "text")
     )
 
-openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 async def run_eval(report: str) -> dict:
-    """Score the report using GPT-4o as an independent judge."""
     response = openai_client.chat.completions.create(
         model="gpt-4o",
         max_tokens=512,
@@ -289,7 +284,7 @@ async def run_eval(report: str) -> dict:
             {"role": "system", "content": EVAL_SYSTEM_PROMPT},
             {"role": "user", "content": report},
         ],
-        response_format={"type": "json_object"},  # forces valid JSON output
+        response_format={"type": "json_object"},
     )
     raw = response.choices[0].message.content
     try:
@@ -302,6 +297,11 @@ async def run_eval(report: str) -> dict:
             "actionability": 0,
             "reasoning": "Eval failed to parse.",
         }
+
+
+# ---------------------------------------------------------------------------
+# Trade intelligence agent (trade MCP)
+# ---------------------------------------------------------------------------
 
 TRADE_AGENT_SYSTEM_PROMPT = """You are WildlifeWatch Trade Intelligence, an expert wildlife crime analyst.
 
@@ -322,11 +322,9 @@ async def run_trade_agent(
     title: str,
     description: str,
     platform: str,
-    image_url: str | None,
+    image_url: Optional[str],
 ) -> dict:
-    """Run the trade analysis agent loop. Returns structured analysis result."""
     combined_text = f"Title: {title}\nPlatform: {platform}\nDescription: {description}"
-
     messages = [{
         "role": "user",
         "content": (
@@ -336,7 +334,6 @@ async def run_trade_agent(
         ),
     }]
 
-    all_tools = state.trade_tools  # only trade tools for this agent
     collected: dict = {}
 
     while True:
@@ -344,37 +341,31 @@ async def run_trade_agent(
             model="claude-sonnet-4-6",
             max_tokens=4096,
             system=TRADE_AGENT_SYSTEM_PROMPT,
-            tools=all_tools,
+            tools=state.trade_tools,
             messages=messages,
         )
 
         if response.stop_reason == "end_turn":
-            # Extract final text
-            final_text = "\n".join(
+            collected["agent_summary"] = "\n".join(
                 block.text for block in response.content if hasattr(block, "text")
             )
-            collected["agent_summary"] = final_text
             return collected
 
         if response.stop_reason == "tool_use":
             messages.append({"role": "assistant", "content": response.content})
             tool_results = []
-
             for block in response.content:
                 if block.type == "tool_use":
                     session = state.sessions.get(block.name)
                     if not session:
                         logger.error("No session for tool: %s", block.name)
                         continue
-
                     mcp_result = await session.call_tool(block.name, block.input)
                     result_text = (
                         mcp_result.content[0].text
                         if mcp_result.content
                         else json.dumps({"error": "empty"})
                     )
-
-                    # Collect key results for structured response
                     try:
                         parsed = json.loads(result_text)
                         if block.name == "classify_listing" and parsed.get("success"):
@@ -410,13 +401,11 @@ async def run_trade_agent(
                             collected["report_markdown"] = parsed.get("report_markdown", "")
                     except Exception:
                         pass
-
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
                         "content": result_text,
                     })
-
             messages.append({"role": "user", "content": tool_results})
         else:
             break
@@ -448,7 +437,6 @@ REPORT_HTML_TEMPLATE = """
 <body>
   <h1>WildlifeWatch Conservation Report</h1>
   <p style="color:#888; font-size:0.9em;">Generated: {generated_at}</p>
-
   <div class="scores">
     <div class="score-item">
       <div class="score-label">Factual Grounding</div>
@@ -463,9 +451,7 @@ REPORT_HTML_TEMPLATE = """
       <div class="score-value">{actionability}/10</div>
     </div>
   </div>
-
   {report_html}
-
   <div class="footer">
     Data sourced from IUCN Red List of Threatened Species v4 API.<br>
     IUCN 2025. IUCN Red List of Threatened Species. Version 2025-2 &lt;www.iucnredlist.org&gt;
@@ -476,16 +462,16 @@ REPORT_HTML_TEMPLATE = """
 
 
 def _markdown_to_html(text: str) -> str:
-    """Basic markdown to HTML conversion."""
-    import re
     text = re.sub(r'^### (.+)$', r'<h3>\1</h3>', text, flags=re.MULTILINE)
     text = re.sub(r'^## (.+)$', r'<h2>\1</h2>', text, flags=re.MULTILINE)
     text = re.sub(r'^# (.+)$', r'<h2>\1</h2>', text, flags=re.MULTILINE)
     text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
     text = re.sub(r'\*(.+?)\*', r'<em>\1</em>', text)
     paragraphs = text.split('\n\n')
-    return '\n'.join(f'<p>{p.strip()}</p>' if not p.strip().startswith('<h') else p.strip()
-                     for p in paragraphs if p.strip())
+    return '\n'.join(
+        f'<p>{p.strip()}</p>' if not p.strip().startswith('<h') else p.strip()
+        for p in paragraphs if p.strip()
+    )
 
 
 def generate_pdf(report_text: str, scores: dict) -> bytes:
@@ -500,21 +486,14 @@ def generate_pdf(report_text: str, scores: dict) -> bytes:
 
 
 def upload_to_s3(pdf_bytes: bytes, report_id: str) -> str:
-    """Upload PDF to S3 and return a presigned URL valid for 24 hours."""
     key = f"reports/{report_id}.pdf"
-    s3_client = get_s3_client()
-    s3_client.put_object(
-        Bucket=S3_BUCKET,
-        Key=key,
-        Body=pdf_bytes,
-        ContentType="application/pdf",
-    )
-    url = s3_client.generate_presigned_url(
+    s3 = get_s3_client()
+    s3.put_object(Bucket=S3_BUCKET, Key=key, Body=pdf_bytes, ContentType="application/pdf")
+    return s3.generate_presigned_url(
         "get_object",
         Params={"Bucket": S3_BUCKET, "Key": key},
-        ExpiresIn=60 * 60 * 24,  # 24 hours
+        ExpiresIn=60 * 60 * 24,
     )
-    return url
 
 
 # ---------------------------------------------------------------------------
@@ -525,12 +504,14 @@ app = FastAPI(title="WildlifeWatch API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+
+# ── Models ────────────────────────────────────────────────────────────────────
 
 class ReportRequest(BaseModel):
     species: Optional[str] = None
@@ -546,80 +527,14 @@ class ReportResponse(BaseModel):
     generated_at: str
 
 
-@app.post("/api/report", response_model=ReportResponse)
-async def generate_report(request: ReportRequest):
-    # check cache first
-    cached = await check_cached_report(
-        species=request.species,
-        country=request.country,
-        year_from=request.year_from,
-        year_to=request.year_to,
-    )
-    if cached:
-        logger.info("Returning cached report %s", cached["report_id"])
-        return ReportResponse(
-            report_id=cached["report_id"],
-            report_url=cached["report_url"],
-            scores=cached["scores"],
-            generated_at=cached["generated_at"],
-        )
-    if not request.species and not request.country:
-        raise HTTPException(
-            status_code=400,
-            detail="At least one of 'species' or 'country' must be provided"
-        )
+class TradeAnalysisRequest(BaseModel):
+    title: str = ""
+    description: str = ""
+    platform: str = "Unknown"
+    image_url: Optional[str] = None
 
-    report_id = str(uuid.uuid4())
 
-    try:
-        # 1. Agent loop — gather data and draft report
-        draft = await run_agent(
-            species=request.species,
-            country=request.country,
-            year_from=request.year_from,
-            year_to=request.year_to,
-        )
-
-        # 2. Reflection — improve the draft
-        refined = await run_reflection(draft)
-
-        # 3. Eval — score the refined report
-        scores = await run_eval(refined)
-
-        # 4. Generate PDF
-        pdf_bytes = generate_pdf(refined, scores)
-
-        # 5. Upload to S3
-        report_url = upload_to_s3(pdf_bytes, report_id)
-
-        # 6. Persist metadata to Postgres
-        await save_report(
-            report_id=report_id,
-            species=request.species,
-            country=request.country,
-            year_from=request.year_from,
-            year_to=request.year_to,
-            scores=scores,
-            report_url=report_url,
-        )
-
-        return ReportResponse(
-            report_id=report_id,
-            report_url=report_url,
-            scores=scores,
-            generated_at=datetime.utcnow().isoformat(),
-        )
-
-    except Exception as e:
-        logger.error("Report generation failed: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/reports")
-async def list_reports(species: Optional[str] = None, country: Optional[str] = None):
-    """List previously generated reports, optionally filtered."""
-    from models import get_reports
-    reports = await get_reports(species=species, country=country)
-    return {"reports": reports}
+# ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/health")
 async def health():
@@ -631,27 +546,17 @@ async def health():
         "trade_tools": [t["name"] for t in state.trade_tools],
     }
 
-class TradeAnalysisRequest(BaseModel):
-    title: str = ""
-    description: str = ""
-    platform: str = "Unknown"
-    image_url: Optional[str] = None
-
 
 @app.post("/api/trade/analyse")
 async def analyse_listing(request: TradeAnalysisRequest):
     if not request.title and not request.description:
         raise HTTPException(status_code=400, detail="title or description required")
 
+    await get_trade_session()
     if not state.trade_session:
-        raise HTTPException(
-            status_code=503,
-            detail="Trade MCP server not connected. Check MCP_TRADE_SERVER_URL env var."
-        )
+        raise HTTPException(status_code=503, detail="Trade MCP server not connected")
 
-    import uuid as _uuid
-    report_id = str(_uuid.uuid4())[:8].upper()
-
+    report_id = str(uuid.uuid4())[:8].upper()
     try:
         result = await run_trade_agent(
             title=request.title,
@@ -669,7 +574,7 @@ async def analyse_listing(request: TradeAnalysisRequest):
 
 @app.get("/api/species/country/{country_code}")
 async def species_by_country(country_code: str):
-    "Proxy to the species MCP get_species_by_country tool."
+    await get_species_session()
     if not state.session:
         raise HTTPException(status_code=503, detail="Species MCP not connected")
     try:
@@ -686,3 +591,69 @@ async def species_by_country(country_code: str):
     except Exception as e:
         logger.error("Species by country failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/report", response_model=ReportResponse)
+async def generate_report(request: ReportRequest):
+    cached = await check_cached_report(
+        species=request.species,
+        country=request.country,
+        year_from=request.year_from,
+        year_to=request.year_to,
+    )
+    if cached:
+        logger.info("Returning cached report %s", cached["report_id"])
+        return ReportResponse(
+            report_id=cached["report_id"],
+            report_url=cached["report_url"],
+            scores=cached["scores"],
+            generated_at=cached["generated_at"],
+        )
+
+    if not request.species and not request.country:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one of 'species' or 'country' must be provided",
+        )
+
+    await get_species_session()
+    if not state.session:
+        raise HTTPException(status_code=503, detail="Species MCP not connected")
+
+    report_id = str(uuid.uuid4())
+    try:
+        draft = await run_agent(
+            species=request.species,
+            country=request.country,
+            year_from=request.year_from,
+            year_to=request.year_to,
+        )
+        refined = await run_reflection(draft)
+        scores = await run_eval(refined)
+        pdf_bytes = generate_pdf(refined, scores)
+        report_url = upload_to_s3(pdf_bytes, report_id)
+        await save_report(
+            report_id=report_id,
+            species=request.species,
+            country=request.country,
+            year_from=request.year_from,
+            year_to=request.year_to,
+            scores=scores,
+            report_url=report_url,
+        )
+        return ReportResponse(
+            report_id=report_id,
+            report_url=report_url,
+            scores=scores,
+            generated_at=datetime.utcnow().isoformat(),
+        )
+    except Exception as e:
+        logger.error("Report generation failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/reports")
+async def list_reports(species: Optional[str] = None, country: Optional[str] = None):
+    from models import get_reports
+    reports = await get_reports(species=species, country=country)
+    return {"reports": reports}
