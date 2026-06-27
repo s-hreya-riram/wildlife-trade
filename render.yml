@@ -10,6 +10,7 @@ services:
     name: wildlifewatch-redis
     plan: free
     maxmemoryPolicy: allkeys-lru
+    ipAllowList: []
 
   # ── Species MCP Server ─────────────────────────────────────────────────────
   - type: web
@@ -18,7 +19,6 @@ services:
     dockerfilePath: ./src/mcp-servers/species/Dockerfile
     dockerContext: ./src/mcp-servers/species
     plan: free
-    healthCheckPath: /health
     envVars:
       - key: IUCN_TOKEN
         sync: false          # set manually in Render dashboard
@@ -37,7 +37,6 @@ services:
     dockerfilePath: ./src/api/Dockerfile
     dockerContext: ./src/api
     plan: free
-    healthCheckPath: /health
     envVars:
       - key: ANTHROPIC_API_KEY
         sync: false
