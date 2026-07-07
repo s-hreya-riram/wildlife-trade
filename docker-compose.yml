@@ -4,7 +4,7 @@ services:
     ports:
       - "6379:6379"
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: [ "CMD", "redis-cli", "ping" ]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -20,7 +20,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U wildlifewatch"]
+      test: [ "CMD-SHELL", "pg_isready -U wildlifewatch" ]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -39,6 +39,21 @@ services:
       redis:
         condition: service_healthy
 
+  trade-mcp-server:
+    build:
+      context: ./src/mcp-servers/trade
+      dockerfile: Dockerfile
+    ports:
+      - "8002:8002"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - SPECIES_PLUS_API_KEY=${SPECIES_PLUS_API_KEY}
+      - MCP_API_KEY=${MCP_API_KEY}
+    depends_on:
+      redis:
+        condition: service_healthy
+
   api:
     build:
       context: ./src/api
@@ -49,7 +64,8 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - MCP_API_KEY=${MCP_API_KEY}
-      - MCP_SPECIES_SERVER_URL=http://species-mcp-server:8001/mcp
+      - MCP_SPECIES_SERVER_URL=http://species-mcp-server:8001
+      - MCP_TRADE_SERVER_URL=http://trade-mcp-server:8002
       - REDIS_URL=redis://redis:6379
       - DATABASE_URL=postgresql://wildlifewatch:wildlifewatch@postgres:5432/wildlifewatch
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
@@ -62,6 +78,8 @@ services:
       postgres:
         condition: service_healthy
       species-mcp-server:
+        condition: service_started
+      trade-mcp-server:
         condition: service_started
 
 volumes:
