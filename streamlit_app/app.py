@@ -71,6 +71,7 @@ def get_species_image(latin: str) -> Optional[str]:
             return url
     return None
 
+
 # ── Page config ───────────────────────────────────────────────────────────────
 
 st.set_page_config(
@@ -126,7 +127,7 @@ for key, default in [
     if key not in st.session_state:
         st.session_state[key] = default
 
-# ── Sidebar nav — uses index, NOT key= on radio ───────────────────────────────
+# ── Sidebar nav ───────────────────────────────────────────────────────────────
 
 VIEWS = ["🌏 Threat Landscape", "🔍 Analyse a Listing", "📋 Tip Report"]
 
@@ -141,18 +142,8 @@ with st.sidebar:
         index=st.session_state.nav,
         label_visibility="collapsed",
     )
-    # keep nav index in sync with radio selection
     st.session_state.nav = VIEWS.index(selected)
     view = selected
-
-    st.markdown("---")
-    st.markdown(
-        "<div style='font-size:0.75rem; color:#4b7a52;'>"
-        "Data: IUCN Red List v4 · CITES Species+<br>"
-        "Built for Build2026 🇸🇬"
-        "</div>",
-        unsafe_allow_html=True,
-    )
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -308,6 +299,98 @@ def _tip_report_to_pdf(markdown_text: str, report_id: str, species_common: str,
     return bytes(pdf.output())
 
 
+def _render_tip_report(report_text: str, result: dict):
+    """Render a tip report inline — shared by Analyse and Tip Report views."""
+    severity = result.get("severity", "")
+    report_id = result.get("report_id") or result.get("id") or "DEMO"
+
+    # Species image
+    img_url = get_species_image(result.get("species_latin", ""))
+    if img_url:
+        col_img, col_meta = st.columns([1, 3])
+        with col_img:
+            st.image(img_url, width=160)
+        with col_meta:
+            if result.get("species_common"):
+                st.markdown(f"**{result['species_common']}**")
+            if result.get("species_latin"):
+                st.markdown(f"*{result['species_latin']}*")
+            if result.get("classification_reasoning"):
+                st.caption(result["classification_reasoning"])
+
+    # Severity banner
+    emoji, color, bg = SEVERITY_META.get(severity, ("", "#718096", "#f9fafb"))
+    if severity:
+        st.markdown(f"""
+        <div style="background:{bg}; border:1px solid {color}44;
+                    border-radius:8px; padding:14px 20px; margin-bottom:20px; margin-top:12px;">
+          <div style="font-weight:600; color:{color}; font-size:1rem;">
+            {emoji} {severity} SEVERITY · {report_id}
+          </div>
+          <div style="font-size:0.84rem; color:#4b5563; margin-top:4px;">
+            {result.get('severity_reason', '')}
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # Metrics strip
+    cites = result.get("cites_appendix")
+    iucn_raw = result.get("iucn_status", "")
+    iucn_label_str = IUCN_LABELS.get(iucn_raw, ("—", ""))[0]
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("Species", result.get("species_common") or "—")
+    with c2:
+        st.metric("CITES", f"Appendix {cites}" if cites else "Not listed")
+    with c3:
+        st.metric("IUCN", iucn_raw or "—", delta=iucn_label_str, delta_color="off")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # Report body
+    st.markdown(report_text)
+
+    # Coded language chips
+    patterns = result.get("matched_patterns", [])
+    if patterns:
+        st.markdown("---")
+        st.markdown("**⚠️ Coded language detected:**")
+        cols = st.columns(min(len(patterns), 4))
+        for i, p in enumerate(patterns):
+            with cols[i % 4]:
+                st.code(p, language=None)
+
+    # Action buttons
+    st.markdown("---")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        pdf_bytes = _tip_report_to_pdf(
+            report_text, report_id,
+            result.get("species_common", ""),
+            result.get("species_latin", ""),
+            severity,
+        )
+        st.download_button(
+            "⬇️ Download PDF",
+            data=pdf_bytes,
+            file_name=f"wildlifewatch-{report_id}.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+        )
+    with col2:
+        st.link_button(
+            "📨 Report to TRAFFIC",
+            "https://www.traffic.org/about-us/contact/",
+            use_container_width=True,
+        )
+    with col3:
+        st.link_button(
+            "📨 Report to NParks/AVS",
+            "https://www.nparks.gov.sg/avs/animals/feedback-and-complaints",
+            use_container_width=True,
+        )
+
+
 # ── View 1: Threat Landscape ──────────────────────────────────────────────────
 
 if view == "🌏 Threat Landscape":
@@ -417,7 +500,7 @@ if view == "🌏 Threat Landscape":
                 if st.button("View report →", key=f"btn_{listing['id']}"):
                     st.session_state.tip_report = _build_synthetic_report(listing)
                     st.session_state.analysis_result = listing
-                    go_to(2)  # navigate to Tip Report
+                    go_to(2)
 
 
 # ── View 2: Analyse a Listing ─────────────────────────────────────────────────
@@ -500,13 +583,33 @@ elif view == "🔍 Analyse a Listing":
                     st.write(f"🎯 **Step 5** — Severity: {emoji} **{sev}** — {sev_reason}")
 
                     status_box.update(label="Analysis complete ✅", state="complete")
+
+                    # Store in session state for Tip Report tab
                     st.session_state.analysis_result = result
                     st.session_state.tip_report = result.get("report_markdown")
 
+            # Render tip report inline immediately — no navigation needed
             if st.session_state.tip_report:
-                st.success("Tip report generated.")
-                if st.button("📋 View Tip Report →", use_container_width=True):
-                    go_to(2)
+                st.markdown("---")
+                st.markdown("### 📋 Tip Report")
+                _render_tip_report(
+                    st.session_state.tip_report,
+                    st.session_state.analysis_result or {},
+                )
+
+    # If there's a report from a previous run this session, show it again
+    elif st.session_state.tip_report and st.session_state.analysis_result:
+        st.markdown("---")
+        st.markdown("### 📋 Last Analysis Result")
+        _render_tip_report(
+            st.session_state.tip_report,
+            st.session_state.analysis_result,
+        )
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("🗑️ Clear and analyse a new listing"):
+            st.session_state.tip_report = None
+            st.session_state.analysis_result = None
+            st.rerun()
 
 
 # ── View 3: Tip Report ────────────────────────────────────────────────────────
@@ -529,96 +632,10 @@ elif view == "📋 Tip Report":
         if st.button("← Analyse a listing"):
             go_to(1)
     else:
-        result = st.session_state.analysis_result or {}
-        severity = result.get("severity", "")
-        report_id = result.get("report_id") or result.get("id") or "DEMO"
-
-        # Species image
-        img_url = get_species_image(result.get("species_latin", ""))
-        if img_url:
-            col_img, col_meta = st.columns([1, 3])
-            with col_img:
-                st.image(img_url, width=160)
-            with col_meta:
-                if result.get("species_common"):
-                    st.markdown(f"**{result['species_common']}**")
-                if result.get("species_latin"):
-                    st.markdown(f"*{result['species_latin']}*")
-                if result.get("classification_reasoning"):
-                    st.caption(result["classification_reasoning"])
-
-        # Severity banner
-        emoji, color, bg = SEVERITY_META.get(severity, ("", "#718096", "#f9fafb"))
-        if severity:
-            st.markdown(f"""
-            <div style="background:{bg}; border:1px solid {color}44;
-                        border-radius:8px; padding:14px 20px; margin-bottom:20px; margin-top:12px;">
-              <div style="font-weight:600; color:{color}; font-size:1rem;">
-                {emoji} {severity} SEVERITY · {report_id}
-              </div>
-              <div style="font-size:0.84rem; color:#4b5563; margin-top:4px;">
-                {result.get('severity_reason', '')}
-              </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        # Metrics strip
-        cites = result.get("cites_appendix")
-        iucn_raw = result.get("iucn_status", "")
-        iucn_label_str = IUCN_LABELS.get(iucn_raw, ("—", ""))[0]
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.metric("Species", result.get("species_common") or "—")
-        with c2:
-            st.metric("CITES", f"Appendix {cites}" if cites else "Not listed")
-        with c3:
-            st.metric("IUCN", iucn_raw or "—", delta=iucn_label_str, delta_color="off")
-
-        st.markdown("<br>", unsafe_allow_html=True)
-
-        # Report body — use st.markdown directly (not inside st.container)
-        st.markdown(st.session_state.tip_report)
-
-        # Coded language chips
-        patterns = result.get("matched_patterns", [])
-        if patterns:
-            st.markdown("---")
-            st.markdown("**⚠️ Coded language detected:**")
-            cols = st.columns(min(len(patterns), 4))
-            for i, p in enumerate(patterns):
-                with cols[i % 4]:
-                    st.code(p, language=None)
-
-        st.markdown("---")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            pdf_bytes = _tip_report_to_pdf(
-                st.session_state.tip_report,
-                report_id,
-                result.get("species_common", ""),
-                result.get("species_latin", ""),
-                severity,
-            )
-            st.download_button(
-                "⬇️ Download PDF",
-                data=pdf_bytes,
-                file_name=f"wildlifewatch-{report_id}.pdf",
-                mime="application/pdf",
-                use_container_width=True,
-            )
-        with col2:
-            st.link_button(
-                "📨 Report to TRAFFIC",
-                "https://www.traffic.org/about-us/contact/",
-                use_container_width=True,
-            )
-        with col3:
-            st.link_button(
-                "📨 Report to NParks/AVS",
-                "https://www.nparks.gov.sg/avs/animals/feedback-and-complaints",
-                use_container_width=True,
-            )
-
+        _render_tip_report(
+            st.session_state.tip_report,
+            st.session_state.analysis_result or {},
+        )
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("← Analyse another listing"):
             st.session_state.tip_report = None
