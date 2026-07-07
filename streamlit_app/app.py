@@ -6,14 +6,15 @@ Three views:
   3. Tip Report        — structured report ready for enforcement submission
 """
 
+import base64
 import json
 import os
 from pathlib import Path
+from typing import Optional
 
 import httpx
 import streamlit as st
 from fpdf import FPDF
-from typing import Optional
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -56,16 +57,14 @@ SPECIES_IMAGES = {
     "Manis spp": "https://upload.wikimedia.org/wikipedia/commons/a/a3/Pangolin.jpg",
     "Panthera tigris": "https://upload.wikimedia.org/wikipedia/commons/6/66/Adult_male_Royal_Bengal_tiger.jpg",
     "Loxodonta africana": "https://upload.wikimedia.org/wikipedia/commons/9/94/178_Male_African_bush_elephant_in_Etosha_National_Park_Photo_by_Giles_Laurent.jpg",
-    # TODO add more species later!!!
 }
+
 
 def get_species_image(latin: str) -> Optional[str]:
     if not latin:
         return None
-    # exact match first
     if latin in SPECIES_IMAGES:
         return SPECIES_IMAGES[latin]
-    # fuzzy: match on genus
     genus = latin.split()[0]
     for key, url in SPECIES_IMAGES.items():
         if key.startswith(genus):
@@ -95,30 +94,12 @@ st.markdown("""
   .stat-number { font-family: 'DM Mono', monospace; font-size: 2.4rem; font-weight: 500; color: #4ade80; line-height: 1; }
   .stat-label { font-size: 0.78rem; color: #6b7280; text-transform: uppercase; letter-spacing: 0.08em; margin-top: 6px; }
 
-  .listing-card {
-    background: #ffffff;
-    border: 1px solid #e5e7eb;
-    border-radius: 8px;
-    padding: 16px 20px;
-    margin-bottom: 10px;
-    border-left: 4px solid #e5e7eb;
-    cursor: pointer;
-    transition: box-shadow 0.15s;
-  }
-  .listing-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+  .listing-card { background: #ffffff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px 20px; margin-bottom: 10px; border-left: 4px solid #e5e7eb; }
   .listing-title { font-weight: 600; font-size: 0.95rem; color: #111827; margin-bottom: 4px; }
   .listing-meta { font-size: 0.8rem; color: #6b7280; }
   .listing-species { font-style: italic; font-size: 0.82rem; color: #374151; margin-top: 4px; }
 
-  .badge {
-    font-family: 'DM Mono', monospace;
-    font-size: 0.72rem;
-    font-weight: 600;
-    padding: 2px 9px;
-    border-radius: 4px;
-    display: inline-block;
-    letter-spacing: 0.05em;
-  }
+  .badge { font-family: 'DM Mono', monospace; font-size: 0.72rem; font-weight: 600; padding: 2px 9px; border-radius: 4px; display: inline-block; letter-spacing: 0.05em; }
   .badge-HIGH   { background: #fee2e2; color: #991b1b; }
   .badge-MEDIUM { background: #ffedd5; color: #9a3412; }
   .badge-LOW    { background: #dcfce7; color: #166534; }
@@ -128,14 +109,6 @@ st.markdown("""
 
   .view-header { font-size: 1.5rem; font-weight: 600; color: #0d1f0f; margin-bottom: 4px; }
   .view-subheader { font-size: 0.88rem; color: #6b7280; margin-bottom: 24px; }
-
-  .report-box { background: #f8faf8; border: 1px solid #d1fae5; border-radius: 8px; padding: 28px 32px; font-size: 0.88rem; line-height: 1.8; }
-
-  .signal-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid #f3f4f6; font-size: 0.85rem; }
-  .signal-label { color: #6b7280; width: 180px; flex-shrink: 0; }
-  .signal-bar-wrap { flex: 1; background: #f3f4f6; border-radius: 4px; height: 8px; }
-  .signal-bar { height: 8px; border-radius: 4px; background: #16a34a; }
-  .signal-value { font-family: 'DM Mono', monospace; font-size: 0.78rem; color: #374151; width: 50px; text-align: right; }
 
   #MainMenu { visibility: hidden; }
   footer { visibility: hidden; }
@@ -148,24 +121,37 @@ st.markdown("""
 for key, default in [
     ("tip_report", None),
     ("analysis_result", None),
-    ("active_view", "🌏 Threat Landscape"),
-    ("selected_listing", None),
+    ("nav", 0),  # 0=Landscape, 1=Analyse, 2=TipReport
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
+# ── Sidebar nav — uses index, NOT key= on radio ───────────────────────────────
+
+VIEWS = ["🌏 Threat Landscape", "🔍 Analyse a Listing", "📋 Tip Report"]
 
 with st.sidebar:
     st.markdown("### 🦅 WildlifeWatch")
     st.markdown("**Trade Intelligence Platform**")
     st.markdown("---")
 
-    view = st.radio(
+    selected = st.radio(
         "Navigate",
-        ["🌏 Threat Landscape", "🔍 Analyse a Listing", "📋 Tip Report"],
-        key="active_view",
+        VIEWS,
+        index=st.session_state.nav,
         label_visibility="collapsed",
+    )
+    # keep nav index in sync with radio selection
+    st.session_state.nav = VIEWS.index(selected)
+    view = selected
+
+    st.markdown("---")
+    st.markdown(
+        "<div style='font-size:0.75rem; color:#4b7a52;'>"
+        "Data: IUCN Red List v4 · CITES Species+<br>"
+        "Built for Build2026 🇸🇬"
+        "</div>",
+        unsafe_allow_html=True,
     )
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -194,9 +180,13 @@ def call_analyse_listing(title, description, platform, image_url, image_b64=None
     try:
         resp = httpx.post(
             f"{API_URL}/api/trade/analyse",
-            json={"title": title, "description": description,
-                "platform": platform, "image_url": image_url or None,
-                "image_b64": image_b64 or None},
+            json={
+                "title": title,
+                "description": description,
+                "platform": platform,
+                "image_url": image_url or None,
+                "image_b64": image_b64 or None,
+            },
             timeout=90,
         )
         resp.raise_for_status()
@@ -206,54 +196,67 @@ def call_analyse_listing(title, description, platform, image_url, image_b64=None
 
 
 def severity_badge(severity: str) -> str:
-    cls = f"badge badge-{severity}"
-    return f'<span class="{cls}">{severity}</span>'
+    return f'<span class="badge badge-{severity}">{severity}</span>'
 
 
-def bar(score: float, color: str = "#16a34a") -> str:
-    pct = int(score * 100)
-    return (
-        f'<div class="signal-bar-wrap">'
-        f'<div class="signal-bar" style="width:{pct}%; background:{color};"></div>'
-        f'</div>'
-    )
+def go_to(view_index: int):
+    """Navigate to a view by index and rerun."""
+    st.session_state.nav = view_index
+    st.rerun()
+
 
 def _build_synthetic_report(listing: dict) -> str:
-        """Build a markdown tip report from a synthetic listing for demo purposes."""
-        sev = listing.get("severity", "LOW")
-        species = listing.get("species_common") or "Unknown"
-        latin = listing.get("species_latin") or "Unknown"
-        cites = listing.get("cites_appendix") or "Not listed"
-        iucn = listing.get("iucn_status") or "Unknown"
-        iucn_label = IUCN_LABELS.get(iucn, ("Unknown", "#718096"))[0]
-        patterns = listing.get("matched_patterns", [])
-        platform = listing.get("platform", "Unknown")
-        title = listing.get("title", "Unknown")
-        confidence = listing.get("confidence", 0)
-        trade_legal = "**All commercial trade is ILLEGAL**" if cites == "I" else "Trade requires CITES permits" if cites == "II" else "Trade not regulated under CITES"
+    """Build a markdown tip report from a synthetic listing."""
+    sev = listing.get("severity", "LOW")
+    species = listing.get("species_common") or "Unknown"
+    latin = listing.get("species_latin") or "Unknown"
+    cites = listing.get("cites_appendix") or "Not listed"
+    iucn = listing.get("iucn_status") or "Unknown"
+    iucn_label = IUCN_LABELS.get(iucn, ("Unknown", "#718096"))[0]
+    patterns = listing.get("matched_patterns", [])
+    platform = listing.get("platform", "Unknown")
+    title = listing.get("title", "Unknown")
+    confidence = listing.get("confidence", 0)
+    trade_legal = (
+        "**All commercial trade is ILLEGAL**" if cites == "I"
+        else "Trade requires CITES permits" if cites == "II"
+        else "Trade not regulated under CITES"
+    )
+    pattern_sentence = (
+        f'The following coded terms were identified: **{", ".join(patterns)}**.'
+        if patterns else
+        "No specific coded language was detected, but species identity and conservation status alone trigger concern."
+    )
+    why_suspicious = (
+        f'The combination of a CITES Appendix {cites}-listed species with {len(patterns)} coded trafficking terms represents a high-probability trade violation.'
+        if patterns else
+        f'This species ({species}) is {iucn_label} and subject to CITES restrictions. The listing warrants investigation to verify legal provenance.'
+    )
+    action = (
+        "Immediate referral to AVS (Animal & Veterinary Service) and NParks CITES enforcement unit. CITES Appendix I species — any trade is presumptively illegal without exceptional documentation."
+        if cites == "I" else
+        "Refer to AVS for permit verification. Request seller documentation of CITES export/import permits and chain of custody."
+    )
 
-        return f"""## Intelligence Summary
-            A **{sev} severity** wildlife trade concern has been identified on {platform}. The listing \"{title}\" has been flagged based on species identification, conservation status, and linguistic analysis of the listing text.
+    return f"""## Intelligence Summary
+A **{sev} severity** wildlife trade concern has been identified on {platform}. The listing "{title}" has been flagged based on species identification, conservation status, and linguistic analysis of the listing text.
 
-            ## Species & Conservation Status
-            - **Species Identified:** {species} (*{latin}*) — {confidence:.0%} confidence
-            - **CITES Status:** Appendix {cites} — {trade_legal}
-            - **IUCN Red List:** {iucn} ({iucn_label})
+## Species & Conservation Status
+- **Species Identified:** {species} (*{latin}*) — {confidence:.0%} confidence
+- **CITES Status:** Appendix {cites} — {trade_legal}
+- **IUCN Red List:** {iucn} ({iucn_label})
 
-            ## Listing Analysis
-            The listing was detected on **{platform}** and contains language consistent with known wildlife trafficking patterns. {f'The following coded terms were identified: **{", ".join(patterns)}**.' if patterns else 'No specific coded language was detected, but species identity and conservation status alone trigger a medium concern flag.'}
+## Listing Analysis
+The listing was detected on **{platform}** and contains language consistent with known wildlife trafficking patterns. {pattern_sentence}
 
-            ## Why This Is Suspicious
-            {f'The combination of a CITES Appendix {cites}-listed species with ' + str(len(patterns)) + ' coded trafficking terms in the listing text represents a high-probability trade violation.' if patterns else f'This species ({species}) is {iucn_label} and subject to CITES restrictions. Even without explicit coded language, the listing warrants investigation to verify legal provenance.'}
+## Why This Is Suspicious
+{why_suspicious}
 
-            ## Recommended Action
-            {'Immediate referral to AVS (Animal & Veterinary Service) and NParks CITES enforcement unit. CITES Appendix I species — any trade is presumptively illegal without exceptional documentation.' if cites == 'I' else 'Refer to AVS for permit verification. Request seller documentation of CITES export/import permits and chain of custody.'}"""
+## Recommended Action
+{action}"""
 
 
 def _pdf_safe(text: str) -> str:
-    """Core PDF fonts only support Latin-1. Swap common punctuation to ASCII
-    equivalents, then hard-fallback any remaining exotic character (emoji, etc.)
-    to '?' rather than crashing generation."""
     replacements = {
         "\u2022": "-", "\u2013": "-", "\u2014": "-",
         "\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"',
@@ -266,14 +269,12 @@ def _pdf_safe(text: str) -> str:
 
 def _tip_report_to_pdf(markdown_text: str, report_id: str, species_common: str,
                         species_latin: str, severity: str) -> bytes:
-    """Render the tip report markdown into a simple PDF, in-memory, no external calls."""
     pdf = FPDF(format="A4")
     pdf.set_auto_page_break(auto=True, margin=18)
     pdf.add_page()
     pdf.set_margins(18, 18, 18)
 
     def line(text: str, size: float, style: str = "", gap_before: float = 0):
-        """Draw one wrapped line, always starting from the left margin."""
         if gap_before:
             pdf.ln(gap_before)
         pdf.set_x(pdf.l_margin)
@@ -281,7 +282,6 @@ def _tip_report_to_pdf(markdown_text: str, report_id: str, species_common: str,
         pdf.multi_cell(pdf.epw, size / 2, _pdf_safe(text))
         pdf.set_x(pdf.l_margin)
 
-    # Header
     line("WildlifeWatch Tip Report", 16, "B")
     pdf.set_text_color(90, 90, 90)
     subtitle = f"Report ID: {report_id}"
@@ -292,7 +292,6 @@ def _tip_report_to_pdf(markdown_text: str, report_id: str, species_common: str,
         line(f"{species_common or ''} ({species_latin or ''})".strip(), 10, "I")
     pdf.set_text_color(0, 0, 0)
 
-    # Body — minimal markdown parsing: "## " headers, "- " bullets, else paragraph text
     for raw_line in markdown_text.splitlines():
         text = raw_line.strip()
         if not text:
@@ -302,16 +301,16 @@ def _tip_report_to_pdf(markdown_text: str, report_id: str, species_common: str,
         if clean.startswith("## "):
             line(clean[3:], 13, "B", gap_before=3)
         elif clean.startswith("- "):
-            line(f"  •  {clean[2:]}", 10.5)
+            line(f"  -  {clean[2:]}", 10.5)
         else:
             line(clean, 10.5)
 
     return bytes(pdf.output())
 
+
 # ── View 1: Threat Landscape ──────────────────────────────────────────────────
 
 if view == "🌏 Threat Landscape":
-    # Hero banner
     st.markdown("""
     <div style="background:#0d1f0f; border-radius:10px; padding:28px 36px; margin-bottom:28px;">
       <div style="font-family:'DM Mono',monospace; font-size:0.72rem; color:#4ade80;
@@ -328,7 +327,6 @@ if view == "🌏 Threat Landscape":
     </div>
     """, unsafe_allow_html=True)
 
-    # Two columns: left = IUCN live data, right = demo feed
     col_left, col_right = st.columns([1, 1], gap="large")
 
     with col_left:
@@ -336,10 +334,7 @@ if view == "🌏 Threat Landscape":
         st.markdown('<div class="view-subheader">Live IUCN Red List data</div>', unsafe_allow_html=True)
 
         selected_name = st.selectbox(
-            "Country",
-            list(SEA_COUNTRIES.values()),
-            index=0,
-            label_visibility="collapsed",
+            "Country", list(SEA_COUNTRIES.values()), index=0, label_visibility="collapsed",
         )
         country_code = {v: k for k, v in SEA_COUNTRIES.items()}[selected_name]
 
@@ -347,7 +342,7 @@ if view == "🌏 Threat Landscape":
             species_list = fetch_sea_endangered(country_code)
 
         if not species_list:
-            st.info("Awaiting live data — species endpoint loading. Check API connection.")
+            st.info("Awaiting live data — species endpoint loading.")
         else:
             cr = sum(1 for s in species_list if s.get("status") == "CR")
             en = sum(1 for s in species_list if s.get("status") == "EN")
@@ -369,9 +364,7 @@ if view == "🌏 Threat Landscape":
                 st.markdown(f"""
                 <div class="species-card" style="border-left-color:{color}">
                   <div class="species-name">{s.get('name', 'Unknown')}</div>
-                  <span style="font-size:0.75rem; color:{color}; font-weight:600;">
-                    {status_code} · {label}
-                  </span>
+                  <span style="font-size:0.75rem; color:{color}; font-weight:600;">{status_code} · {label}</span>
                 </div>
                 """, unsafe_allow_html=True)
 
@@ -396,10 +389,8 @@ if view == "🌏 Threat Landscape":
             st.markdown("<br>", unsafe_allow_html=True)
 
             sev_filter = st.segmented_control(
-                "Filter",
-                ["All", "HIGH", "MEDIUM", "LOW"],
-                default="All",
-                label_visibility="collapsed",
+                "Filter", ["All", "HIGH", "MEDIUM", "LOW"],
+                default="All", label_visibility="collapsed",
             )
             show_listings = listings if sev_filter == "All" else [l for l in listings if l.get("severity") == sev_filter]
 
@@ -423,12 +414,10 @@ if view == "🌏 Threat Landscape":
                 </div>
                 """, unsafe_allow_html=True)
 
-                if st.button(f"View report →", key=f"btn_{listing['id']}"):
-                    # Pre-populate the tip report view with this synthetic listing
+                if st.button("View report →", key=f"btn_{listing['id']}"):
                     st.session_state.tip_report = _build_synthetic_report(listing)
                     st.session_state.analysis_result = listing
-                    st.session_state.active_view = "📋 Tip Report"
-                    st.rerun()
+                    go_to(2)  # navigate to Tip Report
 
 
 # ── View 2: Analyse a Listing ─────────────────────────────────────────────────
@@ -463,21 +452,20 @@ elif view == "🔍 Analyse a Listing":
             "Image URL (optional — used for visual species identification)",
             placeholder="https://…",
         )
-        uploaded = st.file_uploader("Optional - Upload listing image", type=["jpg","jpeg","png"])
-        image_b64 = None
-        if uploaded:
-            import base64
-            image_b64 = base64.b64encode(uploaded.read()).decode()
-            st.image(uploaded, caption="Uploaded image", width=300)
+        uploaded = st.file_uploader("Or upload listing image", type=["jpg", "jpeg", "png"])
         submitted = st.form_submit_button("🔍 Run Analysis", use_container_width=True)
 
     if submitted:
         if not title and not description:
             st.warning("Please enter at least a title or description to analyse.")
         else:
+            image_b64 = None
+            if uploaded:
+                image_b64 = base64.b64encode(uploaded.read()).decode()
+                st.image(uploaded, caption="Uploaded image", width=300)
+
             with st.status("Running trade intelligence analysis…", expanded=True) as status_box:
-                st.write("🔍 **Step 1/5** — Classifying species and material from listing text" +
-                         (" + image" if image_url else "") + "…")
+                st.write("🔍 **Step 1/5** — Classifying species and material…")
                 result = call_analyse_listing(title, description, platform, image_url, image_b64)
 
                 if "error" in result:
@@ -494,8 +482,7 @@ elif view == "🔍 Analyse a Listing":
 
                     cites = result.get("cites_appendix") or "Not found"
                     cites_illegal = result.get("cites_trade_illegal", False)
-                    st.write(f"📋 **Step 2** — CITES: **Appendix {cites}**" +
-                             (" ⛔ Trade ILLEGAL" if cites_illegal else ""))
+                    st.write(f"📋 **Step 2** — CITES: **Appendix {cites}**" + (" ⛔ Trade ILLEGAL" if cites_illegal else ""))
 
                     patterns = result.get("matched_patterns", [])
                     if patterns:
@@ -505,43 +492,22 @@ elif view == "🔍 Analyse a Listing":
 
                     iucn_raw = result.get("iucn_status", "")
                     iucn_label_str = IUCN_LABELS.get(iucn_raw, ("Unknown", ""))[0]
-                    st.write(f"🌿 **Step 4** — IUCN status: **{iucn_raw}** ({iucn_label_str})")
+                    st.write(f"🌿 **Step 4** — IUCN: **{iucn_raw}** ({iucn_label_str})")
 
                     sev = result.get("severity", "LOW")
                     sev_reason = result.get("severity_reason", "")
-                    emoji, color, _ = SEVERITY_META.get(sev, ("🟢", "#166534", "#dcfce7"))
-                    st.write(f"**Step 5** — Severity: {emoji} **{sev}** — {sev_reason}")
+                    emoji = SEVERITY_META.get(sev, ("🟢", "", ""))[0]
+                    st.write(f"🎯 **Step 5** — Severity: {emoji} **{sev}** — {sev_reason}")
 
                     status_box.update(label="Analysis complete ✅", state="complete")
                     st.session_state.analysis_result = result
                     st.session_state.tip_report = result.get("report_markdown")
 
-    if st.session_state.tip_report:
-        st.success("Tip report generated.")
-        if st.button("📋 View Tip Report →", use_container_width=True):
-            st.session_state.active_view = "📋 Tip Report"
-            st.rerun()
-    elif st.session_state.analysis_result and "error" not in st.session_state.analysis_result:
-        # Show signal breakdown even if report generation failed
-        result = st.session_state.analysis_result
-        breakdown = result.get("signal_breakdown", {})
-        if breakdown:
-            st.markdown("**Signal breakdown:**")
-            for label, key, col in [
-                ("CITES status", "cites_contribution", "#e53e3e"),
-                ("IUCN category", "iucn_contribution", "#dd6b20"),
-                ("Classifier confidence", "classifier_contribution", "#3b82f6"),
-                ("Language flags", "language_contribution", "#8b5cf6"),
-            ]:
-                val = breakdown.get(key, 0)
-                st.markdown(
-                    f'<div class="signal-row">'
-                    f'<span class="signal-label">{label}</span>'
-                    f'{bar(val / 0.4, col)}'
-                    f'<span class="signal-value">{val:.2f}</span>'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
+            if st.session_state.tip_report:
+                st.success("Tip report generated.")
+                if st.button("📋 View Tip Report →", use_container_width=True):
+                    go_to(2)
+
 
 # ── View 3: Tip Report ────────────────────────────────────────────────────────
 
@@ -561,30 +527,32 @@ elif view == "📋 Tip Report":
             "or click a listing card in the **Threat Landscape** feed."
         )
         if st.button("← Analyse a listing"):
-            st.session_state.active_view = "🔍 Analyse a Listing"
-            st.rerun()
+            go_to(1)
     else:
         result = st.session_state.analysis_result or {}
+        severity = result.get("severity", "")
+        report_id = result.get("report_id") or result.get("id") or "DEMO"
 
-        latin = result.get("species_latin", "")
+        # Species image
         img_url = get_species_image(result.get("species_latin", ""))
         if img_url:
             col_img, col_meta = st.columns([1, 3])
             with col_img:
                 st.image(img_url, width=160)
             with col_meta:
-                st.markdown(f"**{result.get('species_common', '')}**")
-                st.markdown(f"*{result.get('species_latin', '')}*")
-                if result.get('classification_reasoning'):
-                    st.caption(result['classification_reasoning'])
-        severity = result.get("severity", "")
-        report_id = result.get("report_id") or result.get("id") or "DEMO"
+                if result.get("species_common"):
+                    st.markdown(f"**{result['species_common']}**")
+                if result.get("species_latin"):
+                    st.markdown(f"*{result['species_latin']}*")
+                if result.get("classification_reasoning"):
+                    st.caption(result["classification_reasoning"])
 
+        # Severity banner
         emoji, color, bg = SEVERITY_META.get(severity, ("", "#718096", "#f9fafb"))
         if severity:
             st.markdown(f"""
             <div style="background:{bg}; border:1px solid {color}44;
-                        border-radius:8px; padding:14px 20px; margin-bottom:20px;">
+                        border-radius:8px; padding:14px 20px; margin-bottom:20px; margin-top:12px;">
               <div style="font-weight:600; color:{color}; font-size:1rem;">
                 {emoji} {severity} SEVERITY · {report_id}
               </div>
@@ -594,35 +562,34 @@ elif view == "📋 Tip Report":
             </div>
             """, unsafe_allow_html=True)
 
-        # Species + CITES summary strip
-        species_c = result.get("species_common") or result.get("species_common")
+        # Metrics strip
         cites = result.get("cites_appendix")
         iucn_raw = result.get("iucn_status", "")
-        if species_c or cites:
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                st.metric("Species", species_c or "—")
-            with c2:
-                st.metric("CITES", f"Appendix {cites}" if cites else "Not listed")
-            with c3:
-                iucn_label_str = IUCN_LABELS.get(iucn_raw, ("—", ""))[0]
-                st.metric("IUCN", iucn_raw or "—", delta=iucn_label_str, delta_color="off")
+        iucn_label_str = IUCN_LABELS.get(iucn_raw, ("—", ""))[0]
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.metric("Species", result.get("species_common") or "—")
+        with c2:
+            st.metric("CITES", f"Appendix {cites}" if cites else "Not listed")
+        with c3:
+            st.metric("IUCN", iucn_raw or "—", delta=iucn_label_str, delta_color="off")
 
         st.markdown("<br>", unsafe_allow_html=True)
-        with st.container(border=True):
-            st.markdown(st.session_state.tip_report)
 
-        # Coded language callout
+        # Report body — use st.markdown directly (not inside st.container)
+        st.markdown(st.session_state.tip_report)
+
+        # Coded language chips
         patterns = result.get("matched_patterns", [])
         if patterns:
-            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown("---")
             st.markdown("**⚠️ Coded language detected:**")
             cols = st.columns(min(len(patterns), 4))
             for i, p in enumerate(patterns):
                 with cols[i % 4]:
                     st.code(p, language=None)
 
-        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("---")
         col1, col2, col3 = st.columns(3)
         with col1:
             pdf_bytes = _tip_report_to_pdf(
@@ -633,7 +600,7 @@ elif view == "📋 Tip Report":
                 severity,
             )
             st.download_button(
-                "⬇️ Download report (.pdf)",
+                "⬇️ Download PDF",
                 data=pdf_bytes,
                 file_name=f"wildlifewatch-{report_id}.pdf",
                 mime="application/pdf",
@@ -652,9 +619,8 @@ elif view == "📋 Tip Report":
                 use_container_width=True,
             )
 
-        st.markdown("---")
+        st.markdown("<br>", unsafe_allow_html=True)
         if st.button("← Analyse another listing"):
             st.session_state.tip_report = None
             st.session_state.analysis_result = None
-            st.session_state.active_view = "🔍 Analyse a Listing"
-            st.rerun()
+            go_to(1)
