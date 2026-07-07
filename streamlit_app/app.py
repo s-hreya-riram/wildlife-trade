@@ -463,7 +463,7 @@ elif view == "🔍 Analyse a Listing":
             "Image URL (optional — used for visual species identification)",
             placeholder="https://…",
         )
-        uploaded = st.file_uploader("OPtional - Upload listing image", type=["jpg","jpeg","png"])
+        uploaded = st.file_uploader("Optional - Upload listing image", type=["jpg","jpeg","png"])
         image_b64 = None
         if uploaded:
             import base64
@@ -516,32 +516,32 @@ elif view == "🔍 Analyse a Listing":
                     st.session_state.analysis_result = result
                     st.session_state.tip_report = result.get("report_markdown")
 
-            if st.session_state.tip_report:
-                st.success("Tip report generated.")
-                if st.button("📋 View Tip Report →", use_container_width=True):
-                    st.session_state.active_view = "📋 Tip Report"
-                    st.rerun()
-            elif st.session_state.analysis_result and "error" not in st.session_state.analysis_result:
-                # Show signal breakdown even if report generation failed
-                result = st.session_state.analysis_result
-                breakdown = result.get("signal_breakdown", {})
-                if breakdown:
-                    st.markdown("**Signal breakdown:**")
-                    for label, key, col in [
-                        ("CITES status", "cites_contribution", "#e53e3e"),
-                        ("IUCN category", "iucn_contribution", "#dd6b20"),
-                        ("Classifier confidence", "classifier_contribution", "#3b82f6"),
-                        ("Language flags", "language_contribution", "#8b5cf6"),
-                    ]:
-                        val = breakdown.get(key, 0)
-                        st.markdown(
-                            f'<div class="signal-row">'
-                            f'<span class="signal-label">{label}</span>'
-                            f'{bar(val / 0.4, col)}'
-                            f'<span class="signal-value">{val:.2f}</span>'
-                            f'</div>',
-                            unsafe_allow_html=True,
-                        )
+    if st.session_state.tip_report:
+        st.success("Tip report generated.")
+        if st.button("📋 View Tip Report →", use_container_width=True):
+            st.session_state.active_view = "📋 Tip Report"
+            st.rerun()
+    elif st.session_state.analysis_result and "error" not in st.session_state.analysis_result:
+        # Show signal breakdown even if report generation failed
+        result = st.session_state.analysis_result
+        breakdown = result.get("signal_breakdown", {})
+        if breakdown:
+            st.markdown("**Signal breakdown:**")
+            for label, key, col in [
+                ("CITES status", "cites_contribution", "#e53e3e"),
+                ("IUCN category", "iucn_contribution", "#dd6b20"),
+                ("Classifier confidence", "classifier_contribution", "#3b82f6"),
+                ("Language flags", "language_contribution", "#8b5cf6"),
+            ]:
+                val = breakdown.get(key, 0)
+                st.markdown(
+                    f'<div class="signal-row">'
+                    f'<span class="signal-label">{label}</span>'
+                    f'{bar(val / 0.4, col)}'
+                    f'<span class="signal-value">{val:.2f}</span>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
 
 # ── View 3: Tip Report ────────────────────────────────────────────────────────
 
