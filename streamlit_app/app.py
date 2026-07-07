@@ -122,14 +122,14 @@ st.markdown("""
 for key, default in [
     ("tip_report", None),
     ("analysis_result", None),
-    ("nav", 0),  # 0=Landscape, 1=Analyse, 2=TipReport
+    ("nav", 0),  # 0=Landscape, 1=Analyse
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
 
 # ── Sidebar nav ───────────────────────────────────────────────────────────────
 
-VIEWS = ["🌏 Threat Landscape", "🔍 Analyse a Listing", "📋 Tip Report"]
+VIEWS = ["🌏 Threat Landscape", "🔍 Analyse a Listing"]
 
 with st.sidebar:
     st.markdown("### 🦅 WildlifeWatch")
