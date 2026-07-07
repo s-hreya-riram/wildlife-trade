@@ -12,6 +12,7 @@ from pathlib import Path
 
 import httpx
 import streamlit as st
+from fpdf import FPDF
 from typing import Optional
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -163,20 +164,8 @@ with st.sidebar:
     view = st.radio(
         "Navigate",
         ["🌏 Threat Landscape", "🔍 Analyse a Listing", "📋 Tip Report"],
-        index=["🌏 Threat Landscape", "🔍 Analyse a Listing", "📋 Tip Report"].index(
-            st.session_state.active_view
-        ),
+        key="active_view",
         label_visibility="collapsed",
-    )
-    st.session_state.active_view = view
-
-    st.markdown("---")
-    st.markdown(
-        "<div style='font-size:0.75rem; color:#4b7a52;'>"
-        "Data: IUCN Red List v4 · CITES Species+<br>"
-        "Built for Build2026 🇸🇬"
-        "</div>",
-        unsafe_allow_html=True,
     )
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -259,6 +248,65 @@ def _build_synthetic_report(listing: dict) -> str:
 
             ## Recommended Action
             {'Immediate referral to AVS (Animal & Veterinary Service) and NParks CITES enforcement unit. CITES Appendix I species — any trade is presumptively illegal without exceptional documentation.' if cites == 'I' else 'Refer to AVS for permit verification. Request seller documentation of CITES export/import permits and chain of custody.'}"""
+
+
+def _pdf_safe(text: str) -> str:
+    """Core PDF fonts only support Latin-1. Swap common punctuation to ASCII
+    equivalents, then hard-fallback any remaining exotic character (emoji, etc.)
+    to '?' rather than crashing generation."""
+    replacements = {
+        "\u2022": "-", "\u2013": "-", "\u2014": "-",
+        "\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"',
+        "\u2026": "...",
+    }
+    for bad, good in replacements.items():
+        text = text.replace(bad, good)
+    return text.encode("latin-1", errors="replace").decode("latin-1")
+
+
+def _tip_report_to_pdf(markdown_text: str, report_id: str, species_common: str,
+                        species_latin: str, severity: str) -> bytes:
+    """Render the tip report markdown into a simple PDF, in-memory, no external calls."""
+    pdf = FPDF(format="A4")
+    pdf.set_auto_page_break(auto=True, margin=18)
+    pdf.add_page()
+    pdf.set_margins(18, 18, 18)
+
+    def line(text: str, size: float, style: str = "", gap_before: float = 0):
+        """Draw one wrapped line, always starting from the left margin."""
+        if gap_before:
+            pdf.ln(gap_before)
+        pdf.set_x(pdf.l_margin)
+        pdf.set_font("Helvetica", style, size)
+        pdf.multi_cell(pdf.epw, size / 2, _pdf_safe(text))
+        pdf.set_x(pdf.l_margin)
+
+    # Header
+    line("WildlifeWatch Tip Report", 16, "B")
+    pdf.set_text_color(90, 90, 90)
+    subtitle = f"Report ID: {report_id}"
+    if severity:
+        subtitle += f"   |   Severity: {severity}"
+    line(subtitle, 10)
+    if species_common or species_latin:
+        line(f"{species_common or ''} ({species_latin or ''})".strip(), 10, "I")
+    pdf.set_text_color(0, 0, 0)
+
+    # Body — minimal markdown parsing: "## " headers, "- " bullets, else paragraph text
+    for raw_line in markdown_text.splitlines():
+        text = raw_line.strip()
+        if not text:
+            pdf.ln(2)
+            continue
+        clean = text.replace("**", "")
+        if clean.startswith("## "):
+            line(clean[3:], 13, "B", gap_before=3)
+        elif clean.startswith("- "):
+            line(f"  •  {clean[2:]}", 10.5)
+        else:
+            line(clean, 10.5)
+
+    return bytes(pdf.output())
 
 # ── View 1: Threat Landscape ──────────────────────────────────────────────────
 
@@ -577,11 +625,18 @@ elif view == "📋 Tip Report":
         st.markdown("<br>", unsafe_allow_html=True)
         col1, col2, col3 = st.columns(3)
         with col1:
+            pdf_bytes = _tip_report_to_pdf(
+                st.session_state.tip_report,
+                report_id,
+                result.get("species_common", ""),
+                result.get("species_latin", ""),
+                severity,
+            )
             st.download_button(
-                "⬇️ Download report (.md)",
-                data=st.session_state.tip_report,
-                file_name=f"wildlifewatch-{report_id}.md",
-                mime="text/markdown",
+                "⬇️ Download report (.pdf)",
+                data=pdf_bytes,
+                file_name=f"wildlifewatch-{report_id}.pdf",
+                mime="application/pdf",
                 use_container_width=True,
             )
         with col2:
