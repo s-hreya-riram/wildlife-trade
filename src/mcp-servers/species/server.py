@@ -180,9 +180,15 @@ async def get_countries() -> str:
 # Entry point
 # ---------------------------------------------------------------------------
 
+from starlette.routing import Route
+
+async def health(request):
+    return JSONResponse({"status": "ok"})
+
 if __name__ == "__main__":
     import uvicorn
     app = mcp.streamable_http_app()
+    app.routes.append(Route("/health", health))
     uvicorn.run(app, host="0.0.0.0", port=8001,
                 server_header=False,
                 forwarded_allow_ips="*")

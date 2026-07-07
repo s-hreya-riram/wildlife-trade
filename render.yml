@@ -19,6 +19,7 @@ services:
     dockerfilePath: ./src/mcp-servers/species/Dockerfile
     dockerContext: ./src/mcp-servers/species
     plan: free
+    healthCheckPath: /health
     envVars:
       - key: IUCN_TOKEN
         sync: false          # set manually in Render dashboard
